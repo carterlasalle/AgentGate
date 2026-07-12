@@ -1,0 +1,39 @@
+[package]
+name = "agentgate"
+description = "Local security gateway for AI agents and MCP tool servers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "agentgate"
+
+[[bin]]
+name = "agentgate"
+path = "src/main.rs"
+
+[dependencies]
+agentgate-approval = { path = "../agentgate-approval" }
+agentgate-audit = { path = "../agentgate-audit" }
+agentgate-core = { path = "../agentgate-core" }
+agentgate-integrity = { path = "../agentgate-integrity" }
+agentgate-policy = { path = "../agentgate-policy" }
+agentgate-protocol = { path = "../agentgate-protocol" }
+agentgate-provenance = { path = "../agentgate-provenance" }
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+agentgate-testkit = { path = "../agentgate-testkit" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

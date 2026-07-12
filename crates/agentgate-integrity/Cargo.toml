@@ -1,0 +1,20 @@
+[package]
+name = "agentgate-integrity"
+description = "Tool-manifest integrity, poisoning detection, and action chains"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agentgate-core = { path = "../agentgate-core" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[lints]
+workspace = true

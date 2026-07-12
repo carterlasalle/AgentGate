@@ -1,0 +1,8 @@
+/target/
+/.agentgate/
+*.jsonl
+*.key
+*.pem
+*.profraw
+coverage/
+.DS_Store
