@@ -1,0 +1,141 @@
+apiVersion: agentgate.dev/v1alpha1
+kind: GatewayPolicy
+metadata:
+  name: mac-messages-reference
+  version: 1
+
+defaults:
+  decision: deny
+  audit: metadata
+
+servers:
+  - id: mac-messages
+    command:
+      executable: uvx
+      args: [mac-messages-mcp]
+      inheritEnvironment: []
+    manifest:
+      mode: review_on_change
+    rules:
+      - id: allow-message-reading
+        tools:
+          - tool_get_recent_messages
+          - tool_fuzzy_search_messages
+        effects: [read]
+        decision: allow
+        sources:
+          - select: /content
+            label: personal.messages.content
+
+      - id: allow-attachment-search
+        tools: [tool_search_attachments]
+        effects: [read]
+        decision: allow
+        sources:
+          - select: /content
+            label: personal.messages.attachment_metadata
+
+      - id: confirm-attachment-fetch
+        tools: [tool_get_attachment]
+        effects: [read_file]
+        decision: allow
+        sources:
+          - select: /content
+            label: personal.messages.attachment
+
+      - id: allow-contact-lookup
+        tools: [tool_find_contact, tool_check_imessage_availability]
+        effects: [read]
+        decision: allow
+        sources:
+          - select: /content
+            label: personal.contacts
+
+      - id: confirm-message-send
+        tools: [tool_send_message]
+        effects: [send]
+        decision: allow
+        sinks:
+          - select: /arguments/message
+            label: external.messages
+        obligations:
+          - type: human_approval
+            display: [/arguments/recipient, /arguments/message]
+            ttl: 60s
+
+labels:
+  - name: personal.messages.content
+    sensitivity: restricted
+    normalization: text
+    sessionTaint: true
+    fingerprint:
+      exact: true
+      normalized: true
+      chunks:
+        minBytes: 24
+        windowBytes: 48
+
+  - name: personal.messages.attachment_metadata
+    sensitivity: confidential
+    normalization: text
+    sessionTaint: true
+
+  - name: personal.messages.attachment
+    sensitivity: restricted
+    normalization: binary
+    sessionTaint: true
+
+  - name: personal.contacts
+    sensitivity: confidential
+    normalization: contact
+    sessionTaint: true
+
+  - name: external.messages
+    sensitivity: external
+    sink: true
+
+flows:
+  - id: deny-messages-to-network
+    from: personal.messages
+    to:
+      effects: [network, upload]
+    decision: deny
+
+  - id: approve-message-content-to-send
+    from: personal.messages.content
+    to:
+      server: mac-messages
+      tool: tool_send_message
+      fields: [/arguments/message]
+    decision: allow
+    obligations:
+      - type: human_approval
+        display: [/arguments/recipient, /arguments/message]
+        ttl: 60s
+
+sessionTaint:
+  - id: restrict-unrelated-egress-after-messages
+    whenPresent: personal.messages
+    except:
+      - server: mac-messages
+        tool: tool_send_message
+    toEffects: [network, upload, send]
+    decision: deny
+
+chains:
+  - id: repeated-send-attempts
+    within: 60s
+    sequence:
+      - effectsAny: [send]
+        countAtLeast: 5
+    decision: deny
+    obligations:
+      - type: offer_session_termination
+
+descriptorIntegrity:
+  manifest: review_on_change
+  findings:
+    AG-DESC-HIDDEN-CONTROL: quarantine
+    AG-DESC-CREDENTIAL-SOLICITATION: deny
+    AG-DESC-POLICY-OVERRIDE: quarantine
+    AG-DESC-CROSS-TOOL-COERCION: require_review
