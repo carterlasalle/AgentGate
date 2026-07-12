@@ -139,7 +139,13 @@ impl<P: ApprovalProvider> ApprovalBroker<P> {
             manifest_digest: action.tool.manifest_digest,
             expires_at,
         };
-        match self.provider.decide(&request).await? {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(ttl_seconds),
+            self.provider.decide(&request),
+        )
+        .await
+        .map_err(|_| ApprovalError::Expired)??;
+        match outcome {
             ApprovalOutcome::Deny => return Err(ApprovalError::Denied),
             ApprovalOutcome::TerminateSession => return Err(ApprovalError::TerminateSession),
             ApprovalOutcome::Approve => {}
@@ -220,6 +226,32 @@ impl ApprovalProvider for TerminalProvider {
 
     fn identity(&self) -> &'static str {
         "terminal/v1"
+    }
+}
+
+/// Best available local human-approval surface.
+///
+/// On macOS this uses a native modal dialog, which works for GUI-launched MCP
+/// hosts. Other platforms use the dedicated controlling terminal provider.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InteractiveProvider;
+
+#[async_trait]
+impl ApprovalProvider for InteractiveProvider {
+    async fn decide(&self, request: &ApprovalRequest) -> Result<ApprovalOutcome, ApprovalError> {
+        #[cfg(target_os = "macos")]
+        {
+            let request = request.clone();
+            return tokio::task::spawn_blocking(move || macos_decision(&request))
+                .await
+                .map_err(|error| ApprovalError::Provider(error.to_string()))?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        TerminalProvider.decide(request).await
+    }
+
+    fn identity(&self) -> &'static str {
+        "interactive-local/v1"
     }
 }
 
@@ -376,6 +408,43 @@ fn terminal_decision(request: &ApprovalRequest) -> Result<ApprovalOutcome, Appro
         Ok(ApprovalOutcome::Approve)
     } else if answer.trim().eq_ignore_ascii_case("terminate") {
         Ok(ApprovalOutcome::TerminateSession)
+    } else {
+        Ok(ApprovalOutcome::Deny)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_decision(request: &ApprovalRequest) -> Result<ApprovalOutcome, ApprovalError> {
+    let mut summary = format!(
+        "AgentGate blocked a consequential action.\n\nServer/tool: {}/{}\nEffects: {:?}\n",
+        request.server_id, request.tool, request.effects
+    );
+    for field in &request.fields {
+        summary.push_str(&format!("\n{}: {}", field.selector, field.value));
+    }
+    summary.push_str(&format!("\n\nAction digest: {}", request.action_digest));
+    let script = r#"on run argv
+set promptText to item 1 of argv
+try
+  set response to display dialog promptText with title "AgentGate Approval" buttons {"Deny", "Approve"} default button "Deny" cancel button "Deny" with icon caution
+  return button returned of response
+on error number -128
+  return "Deny"
+end try
+end run"#;
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .arg(summary)
+        .output()
+        .map_err(|error| ApprovalError::Provider(error.to_string()))?;
+    if !output.status.success() {
+        return Err(ApprovalError::Provider(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    if String::from_utf8_lossy(&output.stdout).trim() == "Approve" {
+        Ok(ApprovalOutcome::Approve)
     } else {
         Ok(ApprovalOutcome::Deny)
     }

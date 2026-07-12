@@ -167,6 +167,16 @@ pub fn scan_tool_descriptor(tool: &Value) -> Result<Vec<Finding>, IntegrityError
     Ok(findings)
 }
 
+/// Validates tool arguments against the security-relevant JSON Schema subset.
+///
+/// Supported constraints are recursive `type`, `properties`, `required`,
+/// `additionalProperties`, `items`, `enum`, `const`, string/array length, and
+/// numeric minimum/maximum. Unsupported keywords never grant privilege and
+/// remain available for the downstream server's own validation.
+pub fn validate_tool_arguments(schema: &Value, arguments: &Value) -> Result<(), IntegrityError> {
+    validate_schema_value(schema, arguments, "$", 0)
+}
+
 /// Metadata-only action fact retained in the bounded suspicious-chain graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionFact {
@@ -341,6 +351,9 @@ pub enum IntegrityError {
     /// Action graph bound was zero.
     #[error("action graph capacity must be positive")]
     InvalidLimit,
+    /// Tool arguments did not satisfy the advertised input schema.
+    #[error("tool arguments violate inputSchema: {0}")]
+    InvalidArguments(String),
 }
 
 fn validate_tool_shape(tool: &Value) -> Result<(), IntegrityError> {
@@ -406,6 +419,141 @@ fn finding(id: &str, severity: &str, message: &str) -> Finding {
     }
 }
 
+fn validate_schema_value(
+    schema: &Value,
+    value: &Value,
+    path: &str,
+    depth: usize,
+) -> Result<(), IntegrityError> {
+    if depth > 32 {
+        return Err(IntegrityError::InvalidArguments(format!(
+            "{path}: schema/value depth exceeds 32"
+        )));
+    }
+    let object = schema.as_object().ok_or_else(|| {
+        IntegrityError::InvalidArguments(format!("{path}: schema must be an object"))
+    })?;
+    if let Some(expected) = object.get("const")
+        && value != expected
+    {
+        return Err(IntegrityError::InvalidArguments(format!(
+            "{path}: value does not match const"
+        )));
+    }
+    if let Some(allowed) = object.get("enum").and_then(Value::as_array)
+        && !allowed.contains(value)
+    {
+        return Err(IntegrityError::InvalidArguments(format!(
+            "{path}: value is not in enum"
+        )));
+    }
+    if let Some(expected) = object.get("type") {
+        let type_matches = match expected {
+            Value::String(kind) => matches_type(kind, value),
+            Value::Array(kinds) => kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|kind| matches_type(kind, value)),
+            _ => false,
+        };
+        if !type_matches {
+            return Err(IntegrityError::InvalidArguments(format!(
+                "{path}: value has wrong type"
+            )));
+        }
+    }
+    if let Some(text) = value.as_str() {
+        let length = text.chars().count() as u64;
+        check_u64_bound(object, "minLength", length, true, path)?;
+        check_u64_bound(object, "maxLength", length, false, path)?;
+    }
+    if let Some(number) = value.as_f64() {
+        if let Some(minimum) = object.get("minimum").and_then(Value::as_f64)
+            && number < minimum
+        {
+            return Err(IntegrityError::InvalidArguments(format!(
+                "{path}: number below minimum"
+            )));
+        }
+        if let Some(maximum) = object.get("maximum").and_then(Value::as_f64)
+            && number > maximum
+        {
+            return Err(IntegrityError::InvalidArguments(format!(
+                "{path}: number above maximum"
+            )));
+        }
+    }
+    if let Some(array) = value.as_array() {
+        let length = array.len() as u64;
+        check_u64_bound(object, "minItems", length, true, path)?;
+        check_u64_bound(object, "maxItems", length, false, path)?;
+        if let Some(items) = object.get("items") {
+            for (index, item) in array.iter().enumerate() {
+                validate_schema_value(items, item, &format!("{path}/{index}"), depth + 1)?;
+            }
+        }
+    }
+    if let Some(values) = value.as_object() {
+        let properties = object.get("properties").and_then(Value::as_object);
+        if let Some(required) = object.get("required").and_then(Value::as_array) {
+            for name in required.iter().filter_map(Value::as_str) {
+                if !values.contains_key(name) {
+                    return Err(IntegrityError::InvalidArguments(format!(
+                        "{path}: missing required property {name}"
+                    )));
+                }
+            }
+        }
+        for (name, child) in values {
+            match properties.and_then(|items| items.get(name)) {
+                Some(child_schema) => validate_schema_value(
+                    child_schema,
+                    child,
+                    &format!("{path}/{name}"),
+                    depth + 1,
+                )?,
+                None if object.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                    return Err(IntegrityError::InvalidArguments(format!(
+                        "{path}: unknown property {name}"
+                    )));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn matches_type(kind: &str, value: &Value) -> bool {
+    match kind {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "string" => value.is_string(),
+        _ => false,
+    }
+}
+
+fn check_u64_bound(
+    schema: &serde_json::Map<String, Value>,
+    name: &str,
+    actual: u64,
+    minimum: bool,
+    path: &str,
+) -> Result<(), IntegrityError> {
+    if let Some(limit) = schema.get(name).and_then(Value::as_u64)
+        && ((minimum && actual < limit) || (!minimum && actual > limit))
+    {
+        return Err(IntegrityError::InvalidArguments(format!(
+            "{path}: {name} constraint violated"
+        )));
+    }
+    Ok(())
+}
+
 fn manifest_key(server_id: &str, tool: &str) -> String {
     format!("{server_id}\0{tool}")
 }
@@ -420,6 +568,7 @@ mod tests {
 
     use super::{
         ActionFact, ActionGraph, ManifestStatus, TrustStore, manifest_digest, scan_tool_descriptor,
+        validate_tool_arguments,
     };
 
     fn safe_tool() -> serde_json::Value {
@@ -535,5 +684,34 @@ mod tests {
             argument_digest: Digest::domain(b"arg", b"three"),
         });
         assert_eq!(graph.len(), 2);
+    }
+
+    #[test]
+    fn validates_security_relevant_json_schema_constraints() {
+        let schema = json!({
+            "type":"object",
+            "additionalProperties":false,
+            "properties":{
+                "recipient":{"type":"string","minLength":3},
+                "count":{"type":"integer","minimum":1},
+                "tags":{"type":"array","maxItems":2,"items":{"type":"string"}}
+            },
+            "required":["recipient"]
+        });
+        assert!(
+            validate_tool_arguments(
+                &schema,
+                &json!({"recipient":"+1555","count":1,"tags":["a"]})
+            )
+            .is_ok()
+        );
+        assert!(validate_tool_arguments(&schema, &json!({"count":1})).is_err());
+        assert!(validate_tool_arguments(&schema, &json!({"recipient":"x"})).is_err());
+        assert!(
+            validate_tool_arguments(&schema, &json!({"recipient":"+1555","extra":true})).is_err()
+        );
+        assert!(
+            validate_tool_arguments(&schema, &json!({"recipient":"+1555","count":1.5})).is_err()
+        );
     }
 }

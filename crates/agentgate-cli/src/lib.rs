@@ -5,17 +5,17 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use agentgate_approval::{ApprovalBroker, ApprovalError, ApprovalProvider, TerminalProvider};
-use agentgate_audit::{AuditError, AuditWriter};
+use agentgate_approval::{ApprovalBroker, ApprovalError, ApprovalProvider, InteractiveProvider};
+use agentgate_audit::{AuditError, AuditWriter, apply_retention};
 use agentgate_core::{
     CanonicalAction, Decision, DecisionCode, Digest, Effect, Obligation, ServerId, SessionId,
     ToolIdentity,
 };
 use agentgate_integrity::{
     ActionFact, ActionGraph, IntegrityError, ManifestStatus, TrustStore, manifest_digest,
-    scan_tool_descriptor,
+    scan_tool_descriptor, validate_tool_arguments,
 };
 use agentgate_policy::{CompiledPolicy, DecisionContext, Evaluation, FieldLabel, PolicyError};
 use agentgate_protocol::{
@@ -61,6 +61,13 @@ struct PendingRequest {
     tool: Option<String>,
     evaluation: Option<Evaluation>,
     action_digest: Option<Digest>,
+    deadline: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct TrustedTool {
+    digest: Digest,
+    input_schema: Value,
 }
 
 /// Stateful, single-session protocol reference monitor.
@@ -73,7 +80,7 @@ pub struct GatewayEngine<P> {
     provenance: ProvenanceStore,
     trust: TrustStore,
     trust_path: PathBuf,
-    manifests: HashMap<String, Digest>,
+    manifests: HashMap<String, TrustedTool>,
     pending: HashMap<JsonRpcId, PendingRequest>,
     graph: ActionGraph,
     sequence: u64,
@@ -174,6 +181,20 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             }
         }
 
+        if method.as_deref() == Some("notifications/cancelled") {
+            if let Some(request_id) = message.params().get("requestId")
+                && let Ok(id) = serde_json::from_value::<JsonRpcId>(request_id.clone())
+                && self.pending.remove(&id).is_some()
+            {
+                self.audit.append(
+                    Some(self.session_id),
+                    "decision_made",
+                    json!({"decision":"cancel", "reason":"host cancellation"}),
+                )?;
+            }
+            return Ok(HostDisposition::ToServer(message.into_value()));
+        }
+
         if let (Some(id), Some(method)) = (message.id(), method) {
             if self.pending.contains_key(&id) {
                 return Ok(HostDisposition::ToHost(error_response(
@@ -190,6 +211,7 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
                     tool: None,
                     evaluation: None,
                     action_digest: None,
+                    deadline: Instant::now() + Duration::from_mins(1),
                 },
             );
         }
@@ -236,6 +258,34 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             self.observe_tool_result(&value, &pending)?;
         }
         Ok(ServerDisposition::ToHost(value))
+    }
+
+    /// Expires stalled downstream requests and returns fail-closed host responses.
+    pub fn expire_pending(&mut self) -> Result<Vec<Value>, GatewayError> {
+        let now = Instant::now();
+        let expired: Vec<JsonRpcId> = self
+            .pending
+            .iter()
+            .filter(|(_, request)| request.deadline <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut responses = Vec::with_capacity(expired.len());
+        for id in expired {
+            if let Some(request) = self.pending.remove(&id) {
+                self.audit.append(
+                    Some(self.session_id),
+                    "limit_triggered",
+                    json!({"reason":"request deadline exceeded", "method":request.method}),
+                )?;
+                responses.push(error_response(
+                    Some(id),
+                    GATEWAY_ERROR_CODE,
+                    "AG-LIMIT-EXCEEDED",
+                    "downstream request deadline exceeded",
+                ));
+            }
+        }
+        Ok(responses)
     }
 
     /// Writes a final checkpoint and saves trust state.
@@ -287,7 +337,7 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
                 "tool arguments must be an object",
             )));
         }
-        let Some(manifest) = self.manifests.get(tool).copied() else {
+        let Some(trusted_tool) = self.manifests.get(tool).cloned() else {
             self.audit.append(
                 Some(self.session_id),
                 "decision_made",
@@ -300,6 +350,20 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
                 "tool is not present in the trusted session inventory",
             )));
         };
+        if let Err(error) = validate_tool_arguments(&trusted_tool.input_schema, &arguments) {
+            self.audit.append(
+                Some(self.session_id),
+                "decision_made",
+                json!({"decision":"deny", "code":"AG-PROTOCOL-INVALID", "tool":tool, "reason":error.to_string()}),
+            )?;
+            return Ok(HostDisposition::ToHost(error_response(
+                Some(id),
+                GATEWAY_ERROR_CODE,
+                "AG-PROTOCOL-INVALID",
+                "tool arguments do not satisfy the advertised input schema",
+            )));
+        }
+        let manifest = trusted_tool.digest;
 
         let evidence = self
             .provenance
@@ -326,7 +390,7 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             if evaluation.effects.contains(&effect)
                 && let Some(finding) =
                     self.graph
-                    .repeated_effect(&effect, 4, Duration::from_mins(1), now)
+                        .repeated_effect(&effect, 4, Duration::from_mins(1), now)
             {
                 chain_findings.push(finding);
             }
@@ -449,6 +513,7 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
                 tool: Some(tool.to_owned()),
                 evaluation: Some(evaluation),
                 action_digest: Some(action_digest),
+                deadline: Instant::now() + Duration::from_mins(1),
             },
         );
         Ok(HostDisposition::ToServer(message.into_value()))
@@ -501,7 +566,16 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             if matches!(status, ManifestStatus::New) {
                 self.trust.trust(&self.server_id, &name, digest);
             }
-            self.manifests.insert(name, digest);
+            let input_schema = tool.get("inputSchema").cloned().ok_or_else(|| {
+                GatewayError::InvalidInventory("tool missing inputSchema".to_owned())
+            })?;
+            self.manifests.insert(
+                name,
+                TrustedTool {
+                    digest,
+                    input_schema,
+                },
+            );
             retained.push(tool);
         }
         *tools = retained;
@@ -602,6 +676,8 @@ pub async fn run_stdio(
     policy_path: &Path,
     requested_server: Option<&str>,
     state_dir: &Path,
+    audit_retention_days: u64,
+    audit_maximum_bytes: u64,
 ) -> Result<(), GatewayError> {
     let policy = CompiledPolicy::from_path(policy_path)?;
     let server = match requested_server {
@@ -624,17 +700,22 @@ pub async fn run_stdio(
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         uuid::Uuid::new_v4()
     );
-    let audit_path = state_dir
-        .join("audit")
-        .join(format!("{session_marker}.jsonl"));
+    let audit_directory = state_dir.join("audit");
+    let retention = apply_retention(
+        &audit_directory,
+        Duration::from_secs(audit_retention_days.saturating_mul(86_400)),
+        audit_maximum_bytes,
+    )?;
+    let audit_path = audit_directory.join(format!("{session_marker}.jsonl"));
     let key_path = state_dir.join("keys/audit-ed25519.key");
-    let audit = AuditWriter::create(&audit_path, &key_path, 100)?;
+    let mut audit = AuditWriter::create(&audit_path, &key_path, 100)?;
+    audit.append(None, "retention_applied", serde_json::to_value(&retention)?)?;
     let mut provenance_key = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut provenance_key);
     let mut engine = GatewayEngine::new(
         policy,
         server_id,
-        TerminalProvider,
+        InteractiveProvider,
         audit,
         provenance_key,
         trust,
@@ -663,6 +744,8 @@ pub async fn run_stdio(
     let mut host_reader = BufReader::new(tokio::io::stdin());
     let mut host_writer = BufWriter::new(tokio::io::stdout());
     let limits = Limits::default();
+    let mut deadline_tick = tokio::time::interval(Duration::from_secs(1));
+    deadline_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let reason;
     loop {
         tokio::select! {
@@ -691,6 +774,11 @@ pub async fn run_stdio(
                     ServerDisposition::ToHost(value) => write_value(&mut host_writer, &value).await?,
                     ServerDisposition::ToServer(value) => write_value(&mut downstream_writer, &value).await?,
                     ServerDisposition::Drop => {}
+                }
+            }
+            _ = deadline_tick.tick() => {
+                for response in engine.expire_pending()? {
+                    write_value(&mut host_writer, &response).await?;
                 }
             }
         }

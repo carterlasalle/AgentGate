@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use agentgate_audit::{replay, verify, verifying_key_from_file};
+use agentgate_audit::{replay, rotate_signing_key, verify, verifying_key_from_file};
 use agentgate_policy::CompiledPolicy;
 use clap::{Args, Parser, Subcommand};
 
@@ -40,6 +40,12 @@ struct RunArgs {
     /// Local trust, key, and audit directory.
     #[arg(long, default_value = ".agentgate")]
     state_dir: PathBuf,
+    /// Delete audit logs older than this many days before a session starts.
+    #[arg(long, default_value_t = 30)]
+    audit_retention_days: u64,
+    /// Cap aggregate retained audit JSONL bytes before a session starts.
+    #[arg(long, default_value_t = 536_870_912)]
+    audit_maximum_bytes: u64,
 }
 
 #[derive(Debug, Args)]
@@ -91,6 +97,11 @@ enum AuditCommand {
         #[arg(long)]
         key: Option<PathBuf>,
     },
+    /// Rotate the installation key and archive the old verifier material.
+    RotateKey {
+        /// Active raw AgentGate signing-key file.
+        key: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -108,7 +119,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Version) {
         Command::Run(args) => {
-            agentgate::run_stdio(&args.policy, args.server.as_deref(), &args.state_dir).await?;
+            agentgate::run_stdio(
+                &args.policy,
+                args.server.as_deref(),
+                &args.state_dir,
+                args.audit_retention_days,
+                args.audit_maximum_bytes,
+            )
+            .await?;
         }
         Command::Policy(PolicyArgs {
             command: PolicyCommand::Check { policy },
@@ -146,6 +164,14 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&replay(&path, public.as_ref())?)?
+            );
+        }
+        Command::Audit(AuditArgs {
+            command: AuditCommand::RotateKey { key },
+        }) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rotate_signing_key(&key)?)?
             );
         }
         Command::Doctor(args) => {

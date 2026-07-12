@@ -5,6 +5,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use agentgate_core::{CanonicalJson, Digest, SessionId};
 use base64::Engine as _;
@@ -77,6 +78,32 @@ pub struct ReplayReport {
     pub denied: u64,
     /// Distinct policy digests observed.
     pub policy_digests: Vec<String>,
+}
+
+/// Summary of an explicit age/size retention pass.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RetentionReport {
+    /// Audit files removed.
+    pub removed_files: u64,
+    /// Bytes removed according to pre-delete metadata.
+    pub removed_bytes: u64,
+    /// Bytes retained after the pass.
+    pub retained_bytes: u64,
+}
+
+/// Signed transition produced when rotating the installation audit key.
+#[derive(Clone, Debug, Serialize)]
+pub struct KeyRotationReport {
+    /// Retired key identifier.
+    pub previous_key_id: String,
+    /// New key identifier.
+    pub new_key_id: String,
+    /// New public key in base64.
+    pub new_public_key: String,
+    /// Old key's Ed25519 signature over the new public key transition.
+    pub transition_signature: String,
+    /// Owner-only archived old signing-key path for prior-log verification.
+    pub archived_key: String,
 }
 
 /// Append-only audit writer with periodic Ed25519 checkpoints.
@@ -341,6 +368,103 @@ pub fn verifying_key_from_file(path: &Path) -> Result<VerifyingKey, AuditError> 
     Ok(SigningKey::from_bytes(&key).verifying_key())
 }
 
+/// Applies bounded age and aggregate-size retention to audit JSONL files.
+pub fn apply_retention(
+    directory: &Path,
+    maximum_age: Duration,
+    maximum_bytes: u64,
+) -> Result<RetentionReport, AuditError> {
+    fs::create_dir_all(directory).map_err(AuditError::Io)?;
+    let now = SystemTime::now();
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).map_err(AuditError::Io)? {
+        let entry = entry.map_err(AuditError::Io)?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(AuditError::Io)?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        files.push((path, modified, metadata.len()));
+    }
+    files.sort_by_key(|(_, modified, _)| *modified);
+    let mut report = RetentionReport::default();
+    let mut retained: u64 = files.iter().map(|(_, _, bytes)| bytes).sum();
+    for (path, modified, bytes) in files {
+        let expired = now
+            .duration_since(modified)
+            .is_ok_and(|age| age > maximum_age);
+        if expired || retained > maximum_bytes {
+            fs::remove_file(path).map_err(AuditError::Io)?;
+            retained = retained.saturating_sub(bytes);
+            report.removed_files += 1;
+            report.removed_bytes += bytes;
+        }
+    }
+    report.retained_bytes = retained;
+    Ok(report)
+}
+
+/// Rotates a raw installation signing key and archives the old key owner-only.
+pub fn rotate_signing_key(path: &Path) -> Result<KeyRotationReport, AuditError> {
+    let old_bytes = fs::read(path).map_err(AuditError::Io)?;
+    let old_array: [u8; 32] = old_bytes.try_into().map_err(|_| AuditError::InvalidKey)?;
+    let old = SigningKey::from_bytes(&old_array);
+    let old_id = Digest::domain(b"audit-key/v1", old.verifying_key().as_bytes());
+    let new = SigningKey::generate(&mut OsRng);
+    let new_id = Digest::domain(b"audit-key/v1", new.verifying_key().as_bytes());
+    let mut message = b"agentgate-key-rotation/v1\0".to_vec();
+    message.extend(new.verifying_key().as_bytes());
+    let signature = old.sign(&message);
+
+    let archive = path.with_file_name(format!("audit-ed25519.{}.retired.key", old_id.to_hex()));
+    if archive.exists() {
+        return Err(AuditError::KeyArchiveExists(archive.display().to_string()));
+    }
+    let temporary = path.with_extension("new");
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(AuditError::Io)?;
+    set_owner_only(&file)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&new.to_bytes()).map_err(AuditError::Io)?;
+    writer.flush().map_err(AuditError::Io)?;
+    writer.get_ref().sync_all().map_err(AuditError::Io)?;
+    fs::rename(path, &archive).map_err(AuditError::Io)?;
+    let archive_file = OpenOptions::new()
+        .read(true)
+        .open(&archive)
+        .map_err(AuditError::Io)?;
+    set_owner_only(&archive_file)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::rename(&archive, path);
+        return Err(AuditError::Io(error));
+    }
+
+    let report = KeyRotationReport {
+        previous_key_id: old_id.to_hex(),
+        new_key_id: new_id.to_hex(),
+        new_public_key: BASE64.encode(new.verifying_key().as_bytes()),
+        transition_signature: BASE64.encode(signature.to_bytes()),
+        archived_key: archive.display().to_string(),
+    };
+    let report_path = path.with_file_name(format!(
+        "rotation-{}-to-{}.json",
+        report.previous_key_id, report.new_key_id
+    ));
+    fs::write(
+        report_path,
+        serde_json::to_vec_pretty(&report).map_err(AuditError::Json)?,
+    )
+    .map_err(AuditError::Io)?;
+    Ok(report)
+}
+
 /// Audit storage, canonicalization, signature, or verification error.
 #[derive(Debug, Error)]
 pub enum AuditError {
@@ -385,6 +509,9 @@ pub enum AuditError {
     /// Key file was malformed.
     #[error("invalid Ed25519 signing key file")]
     InvalidKey,
+    /// An archive path already exists, so rotation refused to overwrite it.
+    #[error("retired key archive already exists: {0}")]
+    KeyArchiveExists(String),
 }
 
 fn load_or_create_key(path: &Path) -> Result<SigningKey, AuditError> {
@@ -491,7 +618,9 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{AuditWriter, replay, verify};
+    use super::{
+        AuditWriter, apply_retention, replay, rotate_signing_key, verify, verifying_key_from_file,
+    };
 
     #[test]
     fn writes_verifies_and_replays_metadata_events() {
@@ -589,5 +718,47 @@ mod tests {
             .finish(None)
             .unwrap_or_else(|error| unreachable!("{error}"));
         assert!(verify(&other_log, Some(&trusted)).is_err());
+    }
+
+    #[test]
+    fn rotation_archives_old_key_and_preserves_both_verification_paths() {
+        let directory = tempdir().unwrap_or_else(|error| unreachable!("{error}"));
+        let key = directory.path().join("audit-ed25519.key");
+        let old_log = directory.path().join("old.jsonl");
+        AuditWriter::create(&old_log, &key, 1)
+            .unwrap_or_else(|error| unreachable!("{error}"))
+            .finish(None)
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let report = rotate_signing_key(&key).unwrap_or_else(|error| unreachable!("{error}"));
+        let archived = std::path::PathBuf::from(&report.archived_key);
+        let old_public =
+            verifying_key_from_file(&archived).unwrap_or_else(|error| unreachable!("{error}"));
+        assert!(verify(&old_log, Some(&old_public)).is_ok());
+
+        let new_log = directory.path().join("new.jsonl");
+        AuditWriter::create(&new_log, &key, 1)
+            .unwrap_or_else(|error| unreachable!("{error}"))
+            .finish(None)
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let new_public =
+            verifying_key_from_file(&key).unwrap_or_else(|error| unreachable!("{error}"));
+        assert!(verify(&new_log, Some(&new_public)).is_ok());
+        assert_ne!(report.previous_key_id, report.new_key_id);
+    }
+
+    #[test]
+    fn retention_removes_only_audit_jsonl_files_to_size_bound() {
+        let directory = tempdir().unwrap_or_else(|error| unreachable!("{error}"));
+        fs::write(directory.path().join("one.jsonl"), b"12345")
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        fs::write(directory.path().join("two.jsonl"), b"67890")
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        fs::write(directory.path().join("keep.txt"), b"not an audit")
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let report = apply_retention(directory.path(), std::time::Duration::MAX, 0)
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(report.removed_files, 2);
+        assert_eq!(report.retained_bytes, 0);
+        assert!(directory.path().join("keep.txt").exists());
     }
 }
