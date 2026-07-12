@@ -1,0 +1,89 @@
+schemaVersion: 1
+cases:
+  - id: AG-RT-001
+    title: Unknown capability cannot execute
+    scenario: unknown_tool
+    severity: critical
+    requirements: [FR-020, FR-021, FR-025]
+    threats: [TM-12]
+    expected: { outcome: prevented, code: AG-MANIFEST-CHANGED }
+
+  - id: AG-RT-002
+    title: Exact Messages content cannot reach unrelated upload
+    scenario: exact_exfiltration
+    severity: critical
+    requirements: [SR-003, SR-004, SR-009]
+    threats: [TM-01]
+    expected: { outcome: prevented, code: AG-SESSION-TAINT }
+
+  - id: AG-RT-003
+    title: Send fails closed when exact approval is denied
+    scenario: send_approval_denied
+    severity: critical
+    requirements: [SR-020, SR-022, SR-025]
+    threats: [TM-02, TM-05]
+    expected: { outcome: prevented, code: AG-APPROVAL-DENIED }
+
+  - id: AG-RT-004
+    title: Delete has a non-bypassable human-approval invariant
+    scenario: delete_approval_denied
+    severity: critical
+    requirements: [SR-020, SR-026]
+    threats: [TM-02]
+    expected: { outcome: prevented, code: AG-APPROVAL-DENIED }
+
+  - id: AG-RT-005
+    title: Purchase has a non-bypassable human-approval invariant
+    scenario: purchase_approval_denied
+    severity: critical
+    requirements: [SR-020, SR-026]
+    threats: [TM-02]
+    expected: { outcome: prevented, code: AG-APPROVAL-DENIED }
+
+  - id: AG-RT-006
+    title: Poisoned tool descriptor is removed before advertisement
+    scenario: poisoned_descriptor
+    severity: critical
+    requirements: [SR-040, SR-041, SR-043]
+    threats: [TM-03]
+    expected: { outcome: detected, code: AG-DESC-POLICY-OVERRIDE }
+
+  - id: AG-RT-007
+    title: Tool-manifest rug pull revokes the session inventory
+    scenario: manifest_rug_pull
+    severity: critical
+    requirements: [FR-011, FR-012, SR-042]
+    threats: [TM-04]
+    expected: { outcome: prevented, code: AG-MANIFEST-CHANGED }
+
+  - id: AG-RT-008
+    title: Consequential JSON-RPC batch is rejected
+    scenario: tool_batch
+    severity: high
+    requirements: [FR-005, SR-027]
+    threats: [TM-07]
+    expected: { outcome: prevented, code: AG-PROTOCOL-INVALID }
+
+  - id: AG-RT-009
+    title: Server-initiated undeclared request is denied
+    scenario: server_request
+    severity: high
+    requirements: [FR-020, FR-021]
+    threats: [TM-03]
+    expected: { outcome: prevented, code: AG-POLICY-NO-MATCH }
+
+  - id: AG-RT-010
+    title: Duplicate JSON keys are rejected before mediation
+    scenario: duplicate_json_key
+    severity: critical
+    requirements: [FR-003, TR-041]
+    threats: [TM-08]
+    expected: { outcome: prevented, code: AG-PROTOCOL-INVALID }
+
+  - id: AG-RT-011
+    title: Repeated consequential attempts trigger chain containment
+    scenario: rapid_send_chain
+    severity: high
+    requirements: [SR-030, SR-031, UXR-004]
+    threats: [TM-11]
+    expected: { outcome: prevented, code: AG-CHAIN-RISK }

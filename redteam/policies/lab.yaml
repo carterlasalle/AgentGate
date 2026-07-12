@@ -1,0 +1,70 @@
+apiVersion: agentgate.dev/v1alpha1
+kind: GatewayPolicy
+metadata: { name: agentgate-redteam-lab, version: 1 }
+defaults: { decision: deny, audit: metadata }
+
+servers:
+  - id: redteam-lab
+    command:
+      executable: target/debug/agentgate-fake-mcp
+      args: [--mode, safe]
+      inheritEnvironment: []
+    manifest: { mode: review_on_change }
+    rules:
+      - id: allow-synthetic-read
+        tools: [read_messages]
+        effects: [read]
+        decision: allow
+        sources:
+          - { select: /content/0/text, label: personal.messages.content }
+      - id: allow-confirmed-send
+        tools: [send_message]
+        effects: [send]
+        decision: allow
+        obligations:
+          - { type: human_approval, display: [/arguments/recipient, /arguments/message], ttl: 60s }
+      - id: allow-upload-before-flow-controls
+        tools: [http_upload]
+        effects: [network, upload]
+        decision: allow
+      - id: allow-delete-before-invariant
+        tools: [delete_items]
+        effects: [delete]
+        decision: allow
+      - id: allow-purchase-before-invariant
+        tools: [purchase_item]
+        effects: [purchase]
+        decision: allow
+
+labels:
+  - name: personal.messages.content
+    sensitivity: restricted
+    normalization: text
+    sessionTaint: true
+    fingerprint: { exact: true, normalized: true, chunks: { minBytes: 24, windowBytes: 24 } }
+
+flows:
+  - id: deny-message-upload
+    from: personal.messages
+    to: { effects: [network, upload] }
+    decision: deny
+  - id: allow-message-send
+    from: personal.messages.content
+    to: { server: redteam-lab, tool: send_message, fields: [/arguments/message] }
+    decision: allow
+    obligations:
+      - { type: human_approval, display: [/arguments/recipient, /arguments/message], ttl: 60s }
+
+sessionTaint:
+  - id: restrict-unrelated-egress
+    whenPresent: personal.messages
+    except: [{ server: redteam-lab, tool: send_message }]
+    toEffects: [network, upload, send]
+    decision: deny
+
+descriptorIntegrity:
+  manifest: review_on_change
+  findings:
+    AG-DESC-HIDDEN-CONTROL: quarantine
+    AG-DESC-CREDENTIAL-SOLICITATION: deny
+    AG-DESC-POLICY-OVERRIDE: quarantine
