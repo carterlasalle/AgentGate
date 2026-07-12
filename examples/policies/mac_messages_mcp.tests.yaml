@@ -1,0 +1,30 @@
+schemaVersion: 1
+cases:
+  - name: permits declared message search
+    call:
+      server: mac-messages
+      tool: tool_get_recent_messages
+      arguments: { hours: 24 }
+    expect: { decision: allow }
+
+  - name: denies undeclared tool by default
+    call:
+      server: mac-messages
+      tool: tool_export_all_messages
+      arguments: {}
+    expect: { decision: deny, code: AG-POLICY-NO-MATCH }
+
+  - name: requires exact approval for message send
+    call:
+      server: mac-messages
+      tool: tool_send_message
+      arguments: { recipient: "+15555550100", message: "Synthetic hello" }
+    expect: { decision: allow_with_obligations, code: AG-APPROVAL-REQUIRED }
+
+  - name: permits confirmed release to the same Messages send sink
+    sessionLabels: [personal.messages.content]
+    call:
+      server: mac-messages
+      tool: tool_send_message
+      arguments: { recipient: "+15555550100", message: "Synthetic hello" }
+    expect: { decision: allow_with_obligations, code: AG-APPROVAL-REQUIRED }

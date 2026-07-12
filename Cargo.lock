@@ -21,8 +21,10 @@ dependencies = [
  "rand 0.8.7",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "tempfile",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -37,6 +39,7 @@ dependencies = [
  "hex",
  "rand 0.8.7",
  "serde",
+ "serde_json",
  "sha2",
  "subtle",
  "thiserror",
