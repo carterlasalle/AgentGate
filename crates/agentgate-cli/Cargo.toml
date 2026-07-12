@@ -13,13 +13,13 @@ name = "agentgate"
 path = "src/main.rs"
 
 [dependencies]
-agentgate-approval = { path = "../agentgate-approval" }
-agentgate-audit = { path = "../agentgate-audit" }
-agentgate-core = { path = "../agentgate-core" }
-agentgate-integrity = { path = "../agentgate-integrity" }
-agentgate-policy = { path = "../agentgate-policy" }
-agentgate-protocol = { path = "../agentgate-protocol" }
-agentgate-provenance = { path = "../agentgate-provenance" }
+agentgate-approval = { version = "0.1.0", path = "../agentgate-approval" }
+agentgate-audit = { version = "0.1.0", path = "../agentgate-audit" }
+agentgate-core = { version = "0.1.0", path = "../agentgate-core" }
+agentgate-integrity = { version = "0.1.0", path = "../agentgate-integrity" }
+agentgate-policy = { version = "0.1.0", path = "../agentgate-policy" }
+agentgate-protocol = { version = "0.1.0", path = "../agentgate-protocol" }
+agentgate-provenance = { version = "0.1.0", path = "../agentgate-provenance" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -33,7 +33,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-agentgate-testkit = { path = "../agentgate-testkit" }
+agentgate-testkit = { version = "0.1.0", path = "../agentgate-testkit" }
 serde_yaml_ng.workspace = true
 tempfile.workspace = true
 

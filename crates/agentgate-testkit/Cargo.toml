@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agentgate-core = { path = "../agentgate-core" }
-agentgate-protocol = { path = "../agentgate-protocol" }
+agentgate-core = { version = "0.1.0", path = "../agentgate-core" }
+agentgate-protocol = { version = "0.1.0", path = "../agentgate-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

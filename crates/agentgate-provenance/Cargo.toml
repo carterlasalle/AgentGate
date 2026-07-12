@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agentgate-core = { path = "../agentgate-core" }
+agentgate-core = { version = "0.1.0", path = "../agentgate-core" }
 hex.workspace = true
 hmac.workspace = true
 serde.workspace = true
