@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentgate.dev/schemas/policy-v1alpha1.schema.json",
+  "title": "AgentGate GatewayPolicy v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "defaults", "servers"],
+  "properties": {
+    "apiVersion": { "const": "agentgate.dev/v1alpha1" },
+    "kind": { "const": "GatewayPolicy" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "audit"],
+      "properties": {
+        "decision": { "const": "deny" },
+        "audit": { "const": "metadata" }
+      }
+    },
+    "servers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/server" }
+    },
+    "labels": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/label" }
+    },
+    "flows": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/flow" }
+    },
+    "sessionTaint": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/sessionTaint" }
+    },
+    "chains": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/chain" }
+    },
+    "descriptorIntegrity": { "$ref": "#/$defs/descriptorIntegrity" }
+  },
+  "$defs": {
+    "effect": {
+      "enum": [
+        "read", "read_file", "write", "execute", "network", "send", "upload",
+        "delete", "purchase", "credential_access", "permission_change", "process_control"
+      ]
+    },
+    "decision": { "enum": ["allow", "deny"] },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable"],
+      "properties": {
+        "executable": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "inheritEnvironment": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }, "default": [] },
+        "environment": { "type": "object", "additionalProperties": { "type": "string" }, "default": {} }
+      }
+    },
+    "fieldLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["select", "label"],
+      "properties": {
+        "select": { "type": "string", "pattern": "^/", "maxLength": 512 },
+        "label": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "obligation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "ttl"],
+          "properties": {
+            "type": { "const": "human_approval" },
+            "display": { "type": "array", "items": { "type": "string", "pattern": "^/" }, "default": [] },
+            "ttl": { "type": "string", "pattern": "^[1-9][0-9]{0,2}s$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "offer_session_termination" } }
+        }
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tools", "decision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "tools": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "effects": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/effect" }, "default": [] },
+        "decision": { "$ref": "#/$defs/decision" },
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/fieldLabel" }, "default": [] },
+        "sinks": { "type": "array", "items": { "$ref": "#/$defs/fieldLabel" }, "default": [] },
+        "obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation" }, "default": [] }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "command": { "$ref": "#/$defs/command" },
+        "manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "mode": { "enum": ["review_on_change", "required", "observe"] } }
+        },
+        "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" }, "default": [] }
+      }
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exact": { "type": "boolean", "default": false },
+        "normalized": { "type": "boolean", "default": false },
+        "chunks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minBytes", "windowBytes"],
+          "properties": {
+            "minBytes": { "type": "integer", "minimum": 8 },
+            "windowBytes": { "type": "integer", "minimum": 8 }
+          }
+        }
+      }
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sensitivity"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "sensitivity": { "enum": ["public", "internal", "confidential", "restricted", "external"] },
+        "normalization": { "enum": ["text", "contact", "path", "binary"], "default": "text" },
+        "sessionTaint": { "type": "boolean", "default": false },
+        "sink": { "type": "boolean", "default": false },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" }
+      }
+    },
+    "flowTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "effects": { "type": "array", "items": { "$ref": "#/$defs/effect" }, "default": [] },
+        "server": { "$ref": "#/$defs/identifier" },
+        "tool": { "type": "string", "minLength": 1 },
+        "fields": { "type": "array", "items": { "type": "string", "pattern": "^/" }, "default": [] }
+      },
+      "anyOf": [{ "required": ["effects"] }, { "required": ["server"] }, { "required": ["tool"] }]
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "from", "to", "decision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "from": { "$ref": "#/$defs/identifier" },
+        "to": { "$ref": "#/$defs/flowTarget" },
+        "decision": { "$ref": "#/$defs/decision" },
+        "obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation" }, "default": [] }
+      }
+    },
+    "toolSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "tool"],
+      "properties": {
+        "server": { "$ref": "#/$defs/identifier" },
+        "tool": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sessionTaint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "whenPresent", "toEffects", "decision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "whenPresent": { "$ref": "#/$defs/identifier" },
+        "except": { "type": "array", "items": { "$ref": "#/$defs/toolSelector" }, "default": [] },
+        "toEffects": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/effect" } },
+        "decision": { "const": "deny" }
+      }
+    },
+    "chainStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "effectsAny": { "type": "array", "items": { "$ref": "#/$defs/effect" }, "default": [] },
+        "decisionCodes": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "countAtLeast": { "type": "integer", "minimum": 1, "default": 1 }
+      }
+    },
+    "chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "within", "sequence", "decision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "within": { "type": "string", "pattern": "^[1-9][0-9]*s$" },
+        "sequence": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/chainStep" } },
+        "decision": { "$ref": "#/$defs/decision" },
+        "obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation" }, "default": [] }
+      }
+    },
+    "descriptorIntegrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manifest": { "enum": ["review_on_change", "required", "observe"], "default": "review_on_change" },
+        "findings": {
+          "type": "object",
+          "additionalProperties": { "enum": ["deny", "quarantine", "require_review", "allow_with_warning"] },
+          "default": {}
+        }
+      }
+    }
+  }
+}

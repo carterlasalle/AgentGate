@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import sys
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -24,7 +25,10 @@ REQUIRED = {
     "docs/TECHNICAL_PLAN.md",
     "docs/TEST_STRATEGY.md",
     "docs/TRACEABILITY.md",
+    "docs/USER_GUIDE.md",
+    "docs/DEMO.md",
     "docs/adr/README.md",
+    "CHANGELOG.md",
 }
 
 
@@ -77,12 +81,29 @@ def check_identifiers(files: list[Path], errors: list[str]) -> None:
         errors.append(f"no normative identifiers found for prefix {prefix}")
 
 
+def check_schemas(errors: list[str]) -> None:
+    schemas = sorted((ROOT / "schemas").glob("*.schema.json"))
+    if len(schemas) < 3:
+        errors.append("expected policy, audit, and red-team JSON schemas")
+    for schema in schemas:
+        try:
+            value = json.loads(schema.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f"{schema.relative_to(ROOT)}: invalid JSON schema: {error}")
+            continue
+        if value.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+            errors.append(f"{schema.relative_to(ROOT)}: must declare JSON Schema 2020-12")
+        if not value.get("$id") or not value.get("title"):
+            errors.append(f"{schema.relative_to(ROOT)}: missing $id or title")
+
+
 def main() -> int:
     errors: list[str] = []
     files = markdown_files()
     check_required(errors)
     check_links(files, errors)
     check_identifiers(files, errors)
+    check_schemas(errors)
 
     if errors:
         for error in errors:

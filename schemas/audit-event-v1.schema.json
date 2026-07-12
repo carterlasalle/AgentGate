@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentgate.dev/schemas/audit-event-v1.schema.json",
+  "title": "AgentGate Audit Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "sequence", "timestamp", "session_id", "event_type",
+    "data", "previous_hash", "event_hash"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "session_id": { "type": ["string", "null"], "format": "uuid" },
+    "event_type": { "type": "string", "pattern": "^[a-z_]{1,64}$" },
+    "data": { "type": "object" },
+    "previous_hash": { "$ref": "#/$defs/digest" },
+    "event_hash": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}
