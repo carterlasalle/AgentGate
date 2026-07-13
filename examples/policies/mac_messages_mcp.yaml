@@ -1,4 +1,4 @@
-apiVersion: agentgate.dev/v1alpha1
+apiVersion: agentgate.dev/v1
 kind: GatewayPolicy
 metadata:
   name: mac-messages-reference

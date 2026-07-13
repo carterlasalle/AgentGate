@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentgate.dev/schemas/policy-v1alpha1.schema.json",
-  "title": "AgentGate GatewayPolicy v1alpha1",
+  "$id": "https://agentgate.dev/schemas/policy-v1.schema.json",
+  "title": "AgentGate GatewayPolicy v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["apiVersion", "kind", "metadata", "defaults", "servers"],
   "properties": {
-    "apiVersion": { "const": "agentgate.dev/v1alpha1" },
+    "apiVersion": { "const": "agentgate.dev/v1" },
     "kind": { "const": "GatewayPolicy" },
     "metadata": {
       "type": "object",

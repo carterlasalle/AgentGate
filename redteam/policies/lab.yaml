@@ -1,4 +1,4 @@
-apiVersion: agentgate.dev/v1alpha1
+apiVersion: agentgate.dev/v1
 kind: GatewayPolicy
 metadata: { name: agentgate-redteam-lab, version: 1 }
 defaults: { decision: deny, audit: metadata }

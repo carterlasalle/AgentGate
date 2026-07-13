@@ -106,6 +106,25 @@ pub struct KeyRotationReport {
     pub archived_key: String,
 }
 
+/// Portable detached checkpoint suitable for publishing to an independent store.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DetachedAnchor {
+    /// Stable detached-anchor schema.
+    pub schema_version: u16,
+    /// Number of events covered by the verified log.
+    pub events: u64,
+    /// Final hash of the covered audit chain.
+    pub final_hash: Digest,
+    /// Signing key identifier.
+    pub key_id: String,
+    /// Ed25519 public key encoded as base64.
+    pub public_key: String,
+    /// UTC anchor creation time.
+    pub created_at: DateTime<Utc>,
+    /// Signature over all preceding security fields.
+    pub signature: String,
+}
+
 /// Append-only audit writer with periodic Ed25519 checkpoints.
 pub struct AuditWriter {
     writer: BufWriter<File>,
@@ -368,6 +387,111 @@ pub fn verifying_key_from_file(path: &Path) -> Result<VerifyingKey, AuditError> 
     Ok(SigningKey::from_bytes(&key).verifying_key())
 }
 
+/// Reads a raw 32-byte public Ed25519 verifying key.
+pub fn verifying_key_from_public_file(path: &Path) -> Result<VerifyingKey, AuditError> {
+    let bytes = fs::read(path).map_err(AuditError::Io)?;
+    let key: [u8; 32] = bytes.try_into().map_err(|_| AuditError::InvalidPublicKey)?;
+    VerifyingKey::from_bytes(&key).map_err(|_| AuditError::InvalidPublicKey)
+}
+
+/// Exports a signing key's public verifier without exposing secret material.
+pub fn export_public_key(signing_key: &Path, output: &Path) -> Result<String, AuditError> {
+    let public = verifying_key_from_file(signing_key)?;
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(output)
+        .map_err(AuditError::Io)?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(public.as_bytes())
+        .map_err(AuditError::Io)?;
+    writer.flush().map_err(AuditError::Io)?;
+    writer.get_ref().sync_all().map_err(AuditError::Io)?;
+    Ok(Digest::domain(b"audit-key/v1", public.as_bytes()).to_hex())
+}
+
+/// Verifies a log, then creates a signed detached checkpoint without changing the log.
+pub fn create_detached_anchor(
+    log: &Path,
+    signing_key: &Path,
+    output: &Path,
+) -> Result<DetachedAnchor, AuditError> {
+    let bytes = fs::read(signing_key).map_err(AuditError::Io)?;
+    let key: [u8; 32] = bytes.try_into().map_err(|_| AuditError::InvalidKey)?;
+    let signing = SigningKey::from_bytes(&key);
+    let public = signing.verifying_key();
+    let report = verify(log, Some(&public))?;
+    let created_at = Utc::now();
+    let signature = signing.sign(&anchor_message(
+        report.events,
+        report.final_hash,
+        created_at,
+    ));
+    let anchor = DetachedAnchor {
+        schema_version: 1,
+        events: report.events,
+        final_hash: report.final_hash,
+        key_id: Digest::domain(b"audit-key/v1", public.as_bytes()).to_hex(),
+        public_key: BASE64.encode(public.as_bytes()),
+        created_at,
+        signature: BASE64.encode(signature.to_bytes()),
+    };
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(output)
+        .map_err(AuditError::Io)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, &anchor).map_err(AuditError::Json)?;
+    writer.write_all(b"\n").map_err(AuditError::Io)?;
+    writer.flush().map_err(AuditError::Io)?;
+    writer.get_ref().sync_all().map_err(AuditError::Io)?;
+    Ok(anchor)
+}
+
+/// Verifies a detached checkpoint and proves that it covers the supplied audit log.
+pub fn verify_detached_anchor(
+    log: &Path,
+    anchor_path: &Path,
+    expected_key: Option<&VerifyingKey>,
+) -> Result<DetachedAnchor, AuditError> {
+    let anchor: DetachedAnchor =
+        serde_json::from_slice(&fs::read(anchor_path).map_err(AuditError::Io)?)
+            .map_err(AuditError::Json)?;
+    if anchor.schema_version != 1 {
+        return Err(AuditError::InvalidAnchor("unsupported schema".to_owned()));
+    }
+    let public = decode_public_key(&json!({"public_key": anchor.public_key}))?;
+    if expected_key.is_some_and(|expected| expected.as_bytes() != public.as_bytes()) {
+        return Err(AuditError::UntrustedCheckpointKey);
+    }
+    let expected_id = Digest::domain(b"audit-key/v1", public.as_bytes()).to_hex();
+    if anchor.key_id != expected_id {
+        return Err(AuditError::InvalidAnchor(
+            "key identifier mismatch".to_owned(),
+        ));
+    }
+    let signature = BASE64
+        .decode(&anchor.signature)
+        .map_err(|_| AuditError::InvalidAnchor("invalid signature encoding".to_owned()))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| AuditError::InvalidAnchor("invalid signature size".to_owned()))?;
+    public
+        .verify(
+            &anchor_message(anchor.events, anchor.final_hash, anchor.created_at),
+            &signature,
+        )
+        .map_err(|_| AuditError::InvalidAnchor("signature verification failed".to_owned()))?;
+    let report = verify(log, Some(&public))?;
+    if report.events != anchor.events || report.final_hash != anchor.final_hash {
+        return Err(AuditError::InvalidAnchor(
+            "anchor does not cover this exact log".to_owned(),
+        ));
+    }
+    Ok(anchor)
+}
+
 /// Applies bounded age and aggregate-size retention to audit JSONL files.
 pub fn apply_retention(
     directory: &Path,
@@ -509,6 +633,12 @@ pub enum AuditError {
     /// Key file was malformed.
     #[error("invalid Ed25519 signing key file")]
     InvalidKey,
+    /// Public verifying-key file was malformed.
+    #[error("invalid Ed25519 public key file")]
+    InvalidPublicKey,
+    /// Detached checkpoint was malformed, untrusted, or did not cover the log.
+    #[error("invalid detached audit anchor: {0}")]
+    InvalidAnchor(String),
     /// An archive path already exists, so rotation refused to overwrite it.
     #[error("retired key archive already exists: {0}")]
     KeyArchiveExists(String),
@@ -572,6 +702,14 @@ fn checkpoint_message(sequence: u64, hash: Digest) -> Vec<u8> {
     message
 }
 
+fn anchor_message(events: u64, hash: Digest, created_at: DateTime<Utc>) -> Vec<u8> {
+    let mut message = b"agentgate-detached-anchor/v1\0".to_vec();
+    message.extend(events.to_be_bytes());
+    message.extend(hash.as_bytes());
+    message.extend(created_at.timestamp_micros().to_be_bytes());
+    message
+}
+
 fn decode_public_key(data: &Value) -> Result<VerifyingKey, AuditError> {
     let encoded = data
         .get("public_key")
@@ -619,7 +757,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AuditWriter, apply_retention, replay, rotate_signing_key, verify, verifying_key_from_file,
+        AuditWriter, apply_retention, create_detached_anchor, export_public_key, replay,
+        rotate_signing_key, verify, verify_detached_anchor, verifying_key_from_file,
+        verifying_key_from_public_file,
     };
 
     #[test]
@@ -658,6 +798,41 @@ mod tests {
         assert_eq!(replay.decisions, 1);
         assert_eq!(replay.denied, 1);
         assert_eq!(replay.forwarded, 1);
+    }
+
+    #[test]
+    fn exported_public_key_and_detached_anchor_verify_without_secret_key() {
+        let directory = tempdir().unwrap_or_else(|error| unreachable!("{error}"));
+        let log = directory.path().join("audit.jsonl");
+        let secret = directory.path().join("audit.key");
+        AuditWriter::create(&log, &secret, 100)
+            .unwrap_or_else(|error| unreachable!("{error}"))
+            .finish(None)
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let public_path = directory.path().join("audit.pub");
+        export_public_key(&secret, &public_path).unwrap_or_else(|error| unreachable!("{error}"));
+        let public = verifying_key_from_public_file(&public_path)
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        assert!(verify(&log, Some(&public)).is_ok());
+
+        let anchor_path = directory.path().join("audit.anchor.json");
+        let anchor = create_detached_anchor(&log, &secret, &anchor_path)
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let verified = verify_detached_anchor(&log, &anchor_path, Some(&public))
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(verified.final_hash, anchor.final_hash);
+
+        let mut changed: serde_json::Value = serde_json::from_slice(
+            &fs::read(&anchor_path).unwrap_or_else(|error| unreachable!("{error}")),
+        )
+        .unwrap_or_else(|error| unreachable!("{error}"));
+        changed["events"] = json!(999);
+        fs::write(
+            &anchor_path,
+            serde_json::to_vec_pretty(&changed).unwrap_or_else(|error| unreachable!("{error}")),
+        )
+        .unwrap_or_else(|error| unreachable!("{error}"));
+        assert!(verify_detached_anchor(&log, &anchor_path, Some(&public)).is_err());
     }
 
     #[test]

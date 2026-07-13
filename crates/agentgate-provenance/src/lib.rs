@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use agentgate_core::Digest;
+use agentgate_core::{CanonicalJson, Digest};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -71,6 +71,98 @@ pub struct FlowEvidence {
     pub method: EvidenceMethod,
     /// Keyed fingerprint; never plaintext.
     pub fingerprint: Digest,
+}
+
+/// Security fields authenticated by a trusted host-side lineage adapter.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LineageClaim {
+    /// Stable claim schema.
+    pub schema_version: u16,
+    /// Exact AgentGate session advertised during initialization.
+    pub session_id: String,
+    /// Configured downstream server identity.
+    pub server_id: String,
+    /// Exact destination tool name.
+    pub tool: String,
+    /// Provenance label asserted by the trusted adapter.
+    pub label: String,
+    /// Canonical digest of the exact tool arguments covered by the assertion.
+    pub arguments_digest: Digest,
+    /// Unix timestamp at which the assertion was issued.
+    pub issued_at: u64,
+    /// Unix timestamp after which the assertion fails closed.
+    pub expires_at: u64,
+    /// Adapter-generated unique identifier used for audit correlation.
+    pub nonce: String,
+}
+
+/// Data-only authenticated lineage envelope carried in MCP request `_meta`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SignedLineage {
+    /// Authenticated security fields.
+    pub claim: LineageClaim,
+    /// HMAC-SHA-256 over the canonical claim, encoded as lowercase hex.
+    pub mac: String,
+}
+
+/// Creates a lineage envelope for trusted adapter implementations and test fixtures.
+pub fn sign_lineage(key: &[u8; 32], claim: LineageClaim) -> Result<SignedLineage, ProvenanceError> {
+    validate_lineage_claim(&claim)?;
+    let bytes = canonical_claim(&claim)?;
+    let mut mac = lineage_mac(key)?;
+    mac.update(&bytes);
+    Ok(SignedLineage {
+        claim,
+        mac: hex::encode(mac.finalize().into_bytes()),
+    })
+}
+
+/// Authenticates and binds a lineage envelope to one exact session, destination, and argument set.
+pub fn verify_lineage(
+    key: &[u8; 32],
+    envelope: &SignedLineage,
+    session_id: &str,
+    server_id: &str,
+    tool: &str,
+    arguments: &Value,
+    now: u64,
+) -> Result<FlowEvidence, ProvenanceError> {
+    validate_lineage_claim(&envelope.claim)?;
+    if envelope.claim.session_id != session_id
+        || envelope.claim.server_id != server_id
+        || envelope.claim.tool != tool
+    {
+        return Err(ProvenanceError::LineageBinding);
+    }
+    if now < envelope.claim.issued_at || now > envelope.claim.expires_at {
+        return Err(ProvenanceError::LineageExpired);
+    }
+    let arguments_digest = lineage_arguments_digest(arguments)?;
+    if envelope.claim.arguments_digest != arguments_digest {
+        return Err(ProvenanceError::LineageBinding);
+    }
+    let provided = hex::decode(&envelope.mac).map_err(|_| ProvenanceError::InvalidLineageMac)?;
+    let bytes = canonical_claim(&envelope.claim)?;
+    let mut mac = lineage_mac(key)?;
+    mac.update(&bytes);
+    mac.verify_slice(&provided)
+        .map_err(|_| ProvenanceError::InvalidLineageMac)?;
+    Ok(FlowEvidence {
+        label: envelope.claim.label.clone(),
+        method: EvidenceMethod::AuthenticatedLineage,
+        fingerprint: Digest::domain(b"authenticated-lineage/v1", &bytes),
+    })
+}
+
+/// Computes the stable digest that a trusted adapter places in a lineage claim.
+pub fn lineage_arguments_digest(arguments: &Value) -> Result<Digest, ProvenanceError> {
+    let canonical = CanonicalJson::from_value(arguments).map_err(ProvenanceError::Core)?;
+    Ok(Digest::domain(
+        b"lineage-arguments/v1",
+        canonical.as_bytes(),
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +390,52 @@ pub enum ProvenanceError {
     /// Per-installation HMAC key initialization failed.
     #[error("invalid provenance key")]
     InvalidKey,
+    /// Authenticated-lineage claim fields were malformed or excessive.
+    #[error("invalid authenticated lineage claim")]
+    InvalidLineageClaim,
+    /// Authenticated lineage was stale or not yet valid.
+    #[error("authenticated lineage claim is outside its validity window")]
+    LineageExpired,
+    /// Authenticated lineage did not bind to this session, tool, or argument set.
+    #[error("authenticated lineage claim binding mismatch")]
+    LineageBinding,
+    /// Authenticated lineage MAC was malformed or did not verify.
+    #[error("authenticated lineage MAC verification failed")]
+    InvalidLineageMac,
+    /// Canonical lineage serialization failed.
+    #[error("authenticated lineage canonicalization failed: {0}")]
+    Core(agentgate_core::CoreError),
+}
+
+fn validate_lineage_claim(claim: &LineageClaim) -> Result<(), ProvenanceError> {
+    if claim.schema_version != 1
+        || claim.session_id.is_empty()
+        || claim.session_id.len() > 128
+        || claim.server_id.is_empty()
+        || claim.server_id.len() > 128
+        || claim.tool.is_empty()
+        || claim.tool.len() > 256
+        || claim.nonce.len() < 16
+        || claim.nonce.len() > 128
+        || claim.expires_at < claim.issued_at
+        || claim.expires_at.saturating_sub(claim.issued_at) > 300
+    {
+        return Err(ProvenanceError::InvalidLineageClaim);
+    }
+    validate_label(&claim.label)
+}
+
+fn canonical_claim(claim: &LineageClaim) -> Result<Vec<u8>, ProvenanceError> {
+    let value = serde_json::to_value(claim).map_err(|_| ProvenanceError::InvalidLineageClaim)?;
+    let canonical = CanonicalJson::from_value(&value).map_err(ProvenanceError::Core)?;
+    Ok(canonical.as_bytes().to_vec())
+}
+
+fn lineage_mac(key: &[u8; 32]) -> Result<HmacSha256, ProvenanceError> {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key).map_err(|_| ProvenanceError::InvalidKey)?;
+    mac.update(b"agentgate-lineage/v1\0");
+    Ok(mac)
 }
 
 fn fingerprint(key: &[u8; 32], domain: &[u8], payload: &[u8]) -> Result<Digest, ProvenanceError> {
@@ -410,7 +548,10 @@ fn validate_label(label: &str) -> Result<(), ProvenanceError> {
 mod tests {
     use serde_json::json;
 
-    use super::{EvidenceMethod, Normalization, ProvenanceStore};
+    use super::{
+        EvidenceMethod, LineageClaim, Normalization, ProvenanceStore, lineage_arguments_digest,
+        sign_lineage, verify_lineage,
+    };
 
     #[test]
     fn exact_and_normalized_reuse_are_detected() {
@@ -504,5 +645,71 @@ mod tests {
             .inspect(Normalization::Contact, &json!("+15555550100"), &[])
             .unwrap_or_else(|error| unreachable!("{error}"));
         assert!(!evidence.is_empty());
+    }
+
+    #[test]
+    fn authenticated_lineage_is_bound_to_session_tool_arguments_and_time() {
+        let key = [11; 32];
+        let arguments = json!({"destination": "review", "summary": "derived text"});
+        let claim = LineageClaim {
+            schema_version: 1,
+            session_id: "session-1".to_owned(),
+            server_id: "uploader".to_owned(),
+            tool: "upload_report".to_owned(),
+            label: "personal.messages.derived".to_owned(),
+            arguments_digest: lineage_arguments_digest(&arguments)
+                .unwrap_or_else(|error| unreachable!("{error}")),
+            issued_at: 100,
+            expires_at: 160,
+            nonce: "0123456789abcdef".to_owned(),
+        };
+        let envelope = sign_lineage(&key, claim).unwrap_or_else(|error| unreachable!("{error}"));
+        let evidence = verify_lineage(
+            &key,
+            &envelope,
+            "session-1",
+            "uploader",
+            "upload_report",
+            &arguments,
+            120,
+        )
+        .unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(evidence.method, EvidenceMethod::AuthenticatedLineage);
+        assert!(
+            verify_lineage(
+                &key,
+                &envelope,
+                "session-2",
+                "uploader",
+                "upload_report",
+                &arguments,
+                120,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_lineage(
+                &key,
+                &envelope,
+                "session-1",
+                "uploader",
+                "upload_report",
+                &json!({"destination": "elsewhere"}),
+                120,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_lineage(
+                &key,
+                &envelope,
+                "session-1",
+                "uploader",
+                "upload_report",
+                &arguments,
+                161,
+            )
+            .is_err()
+        );
     }
 }

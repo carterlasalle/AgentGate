@@ -22,7 +22,9 @@ use agentgate_protocol::{
     JsonRpcId, Limits, Message, MessageKind, ProtocolError, SUPPORTED_MCP_VERSION, error_response,
     read_frame, write_value,
 };
-use agentgate_provenance::{Normalization, ProvenanceError, ProvenanceStore};
+use agentgate_provenance::{
+    Normalization, ProvenanceError, ProvenanceStore, SignedLineage, verify_lineage,
+};
 use chrono::Utc;
 use rand::RngCore as _;
 use serde_json::{Value, json};
@@ -84,6 +86,7 @@ pub struct GatewayEngine<P> {
     pending: HashMap<JsonRpcId, PendingRequest>,
     graph: ActionGraph,
     sequence: u64,
+    lineage_key: Option<[u8; 32]>,
 }
 
 impl<P: ApprovalProvider> GatewayEngine<P> {
@@ -123,7 +126,15 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             pending: HashMap::new(),
             graph: ActionGraph::new(1_000)?,
             sequence: 0,
+            lineage_key: None,
         })
+    }
+
+    /// Enables authenticated host-lineage assertions using a dedicated shared key.
+    #[must_use]
+    pub const fn with_lineage_key(mut self, key: [u8; 32]) -> Self {
+        self.lineage_key = Some(key);
+        self
     }
 
     /// Session identity used in audit and approval binding.
@@ -252,7 +263,9 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             return Ok(ServerDisposition::Drop);
         };
         let mut value = message.into_value();
-        if pending.method == "tools/list" {
+        if pending.method == "initialize" {
+            advertise_agentgate_session(&mut value, self.session_id, self.lineage_key.is_some());
+        } else if pending.method == "tools/list" {
             self.filter_inventory(&mut value)?;
         } else if pending.method == "tools/call" {
             self.observe_tool_result(&value, &pending)?;
@@ -365,9 +378,43 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
         }
         let manifest = trusted_tool.digest;
 
-        let evidence = self
+        let mut evidence = self
             .provenance
             .inspect(Normalization::Text, &arguments, &[48])?;
+        if let Some(lineage_value) = params
+            .get("_meta")
+            .and_then(|value| value.get("agentgateLineage"))
+        {
+            let key = self.lineage_key.as_ref().ok_or_else(|| {
+                GatewayError::InvalidLineage(
+                    "host supplied lineage but no lineage key is configured".to_owned(),
+                )
+            })?;
+            let envelopes: Vec<SignedLineage> = serde_json::from_value(lineage_value.clone())
+                .map_err(|error| GatewayError::InvalidLineage(error.to_string()))?;
+            if envelopes.is_empty() || envelopes.len() > 32 {
+                return Err(GatewayError::InvalidLineage(
+                    "lineage list must contain 1-32 assertions".to_owned(),
+                ));
+            }
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|_| {
+                    GatewayError::InvalidLineage("system clock is before epoch".to_owned())
+                })?
+                .as_secs();
+            for envelope in envelopes {
+                evidence.push(verify_lineage(
+                    key,
+                    &envelope,
+                    &self.session_id.to_string(),
+                    &self.server_id,
+                    tool,
+                    &arguments,
+                    now,
+                )?);
+            }
+        }
         let mut active_labels = self.provenance.active_labels().clone();
         active_labels.extend(evidence.iter().map(|item| item.label.clone()));
         let mut evaluation = self.policy.evaluate(&DecisionContext {
@@ -678,6 +725,7 @@ pub async fn run_stdio(
     state_dir: &Path,
     audit_retention_days: u64,
     audit_maximum_bytes: u64,
+    lineage_key_path: Option<&Path>,
 ) -> Result<(), GatewayError> {
     let policy = CompiledPolicy::from_path(policy_path)?;
     let server = match requested_server {
@@ -712,6 +760,7 @@ pub async fn run_stdio(
     audit.append(None, "retention_applied", serde_json::to_value(&retention)?)?;
     let mut provenance_key = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut provenance_key);
+    let lineage_key = lineage_key_path.map(load_lineage_key).transpose()?;
     let mut engine = GatewayEngine::new(
         policy,
         server_id,
@@ -721,6 +770,9 @@ pub async fn run_stdio(
         trust,
         trust_path,
     )?;
+    if let Some(key) = lineage_key {
+        engine = engine.with_lineage_key(key);
+    }
 
     let mut command = Command::new(&command_spec.executable);
     command
@@ -832,6 +884,9 @@ pub enum GatewayError {
     /// State directory could not be prepared.
     #[error("failed to prepare state directory: {0}")]
     State(std::io::Error),
+    /// Authenticated host-lineage configuration or assertion was invalid.
+    #[error("invalid authenticated lineage: {0}")]
+    InvalidLineage(String),
 }
 
 fn is_mediated_tool_call(value: &Value) -> bool {
@@ -862,6 +917,33 @@ fn fs_prepare(path: &Path) -> Result<(), GatewayError> {
     std::fs::create_dir_all(path).map_err(GatewayError::State)
 }
 
+fn load_lineage_key(path: &Path) -> Result<[u8; 32], GatewayError> {
+    let bytes = std::fs::read(path).map_err(GatewayError::State)?;
+    bytes.try_into().map_err(|_| {
+        GatewayError::InvalidLineage("lineage key must be exactly 32 bytes".to_owned())
+    })
+}
+
+fn advertise_agentgate_session(response: &mut Value, session: SessionId, lineage: bool) {
+    let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let metadata = result
+        .entry("_meta")
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    if let Some(metadata) = metadata {
+        metadata.insert(
+            "agentgate".to_owned(),
+            json!({
+                "version": 1,
+                "sessionId": session.to_string(),
+                "authenticatedLineage": lineage,
+            }),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -876,7 +958,7 @@ mod tests {
     use super::{GatewayEngine, HostDisposition, ServerDisposition};
 
     const POLICY: &str = r#"
-apiVersion: agentgate.dev/v1alpha1
+apiVersion: agentgate.dev/v1
 kind: GatewayPolicy
 metadata: { name: integration, version: 1 }
 defaults: { decision: deny, audit: metadata }

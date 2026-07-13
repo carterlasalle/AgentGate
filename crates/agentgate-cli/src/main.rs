@@ -4,8 +4,11 @@
 
 use std::path::PathBuf;
 
-use agentgate_audit::{replay, rotate_signing_key, verify, verifying_key_from_file};
-use agentgate_policy::CompiledPolicy;
+use agentgate_audit::{
+    create_detached_anchor, export_public_key, replay, rotate_signing_key, verify,
+    verify_detached_anchor, verifying_key_from_public_file,
+};
+use agentgate_policy::{CompiledPolicy, migrate_v1alpha1_to_v1};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -46,6 +49,9 @@ struct RunArgs {
     /// Cap aggregate retained audit JSONL bytes before a session starts.
     #[arg(long, default_value_t = 536_870_912)]
     audit_maximum_bytes: u64,
+    /// Dedicated raw 32-byte key shared with a trusted host-lineage adapter.
+    #[arg(long)]
+    lineage_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -71,6 +77,24 @@ enum PolicyCommand {
         #[arg(long)]
         cases: PathBuf,
     },
+    /// Migrate a preview v1alpha1 policy to stable v1 without activating it.
+    Migrate {
+        /// Preview AgentGate YAML policy.
+        #[arg(long)]
+        policy: PathBuf,
+        /// Destination for the stable policy; refuses to overwrite.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Compare two policies by canonical digest and stable identities.
+    Diff {
+        /// Currently active stable policy.
+        #[arg(long)]
+        current: PathBuf,
+        /// Candidate stable policy.
+        #[arg(long)]
+        candidate: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -85,22 +109,53 @@ enum AuditCommand {
     Verify {
         /// Audit JSONL path.
         path: PathBuf,
-        /// Optional trusted raw AgentGate signing-key file.
+        /// Optional trusted raw public Ed25519 key file.
         #[arg(long)]
-        key: Option<PathBuf>,
+        public_key: Option<PathBuf>,
     },
     /// Verify and summarize metadata without launching tools or making network calls.
     Replay {
         /// Audit JSONL path.
         path: PathBuf,
-        /// Optional trusted raw AgentGate signing-key file.
+        /// Optional trusted raw public Ed25519 key file.
         #[arg(long)]
-        key: Option<PathBuf>,
+        public_key: Option<PathBuf>,
     },
     /// Rotate the installation key and archive the old verifier material.
     RotateKey {
         /// Active raw AgentGate signing-key file.
         key: PathBuf,
+    },
+    /// Export a shareable public verifier from the installation signing key.
+    ExportKey {
+        /// Active raw AgentGate signing-key file.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// New raw public-key destination; refuses to overwrite.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Create a detached signed checkpoint for independent publication.
+    Anchor {
+        /// Audit JSONL path.
+        path: PathBuf,
+        /// Active raw AgentGate signing-key file.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// New detached-anchor JSON destination; refuses to overwrite.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Verify a detached checkpoint against an exact audit log.
+    VerifyAnchor {
+        /// Audit JSONL path.
+        path: PathBuf,
+        /// Detached-anchor JSON path.
+        #[arg(long)]
+        anchor: PathBuf,
+        /// Optional independently trusted raw public key.
+        #[arg(long)]
+        public_key: Option<PathBuf>,
     },
 }
 
@@ -125,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
                 &args.state_dir,
                 args.audit_retention_days,
                 args.audit_maximum_bytes,
+                args.lineage_key.as_deref(),
             )
             .await?;
         }
@@ -148,19 +204,48 @@ async fn main() -> anyhow::Result<()> {
             let report = policy.test_yaml(&source)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Audit(AuditArgs {
-            command: AuditCommand::Verify { path, key },
+        Command::Policy(PolicyArgs {
+            command: PolicyCommand::Migrate { policy, output },
         }) => {
-            let public = key.as_deref().map(verifying_key_from_file).transpose()?;
+            let source = std::fs::read_to_string(policy)?;
+            let migrated = migrate_v1alpha1_to_v1(&source)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            use std::io::Write as _;
+            let mut file = options.open(&output)?;
+            file.write_all(migrated.as_bytes())?;
+            file.sync_all()?;
+            println!("wrote stable v1 policy: {}", output.display());
+        }
+        Command::Policy(PolicyArgs {
+            command: PolicyCommand::Diff { current, candidate },
+        }) => {
+            let current = CompiledPolicy::from_path(&current)?;
+            let candidate = CompiledPolicy::from_path(&candidate)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&current.diff(&candidate))?
+            );
+        }
+        Command::Audit(AuditArgs {
+            command: AuditCommand::Verify { path, public_key },
+        }) => {
+            let public = public_key
+                .as_deref()
+                .map(verifying_key_from_public_file)
+                .transpose()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&verify(&path, public.as_ref())?)?
             );
         }
         Command::Audit(AuditArgs {
-            command: AuditCommand::Replay { path, key },
+            command: AuditCommand::Replay { path, public_key },
         }) => {
-            let public = key.as_deref().map(verifying_key_from_file).transpose()?;
+            let public = public_key
+                .as_deref()
+                .map(verifying_key_from_public_file)
+                .transpose()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&replay(&path, public.as_ref())?)?
@@ -172,6 +257,54 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&rotate_signing_key(&key)?)?
+            );
+        }
+        Command::Audit(AuditArgs {
+            command:
+                AuditCommand::ExportKey {
+                    signing_key,
+                    output,
+                },
+        }) => {
+            let key_id = export_public_key(&signing_key, &output)?;
+            println!("exported public key {} to {}", key_id, output.display());
+        }
+        Command::Audit(AuditArgs {
+            command:
+                AuditCommand::Anchor {
+                    path,
+                    signing_key,
+                    output,
+                },
+        }) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&create_detached_anchor(
+                    &path,
+                    &signing_key,
+                    &output
+                )?)?
+            );
+        }
+        Command::Audit(AuditArgs {
+            command:
+                AuditCommand::VerifyAnchor {
+                    path,
+                    anchor,
+                    public_key,
+                },
+        }) => {
+            let public = public_key
+                .as_deref()
+                .map(verifying_key_from_public_file)
+                .transpose()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&verify_detached_anchor(
+                    &path,
+                    &anchor,
+                    public.as_ref()
+                )?)?
             );
         }
         Command::Doctor(args) => {

@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-/// Supported policy API version.
-pub const POLICY_API_VERSION: &str = "agentgate.dev/v1alpha1";
+/// Stable policy API version supported by AgentGate 1.x.
+pub const POLICY_API_VERSION: &str = "agentgate.dev/v1";
+/// Preview policy API accepted only by the explicit migration API.
+pub const LEGACY_POLICY_API_VERSION: &str = "agentgate.dev/v1alpha1";
 
 /// Parsed policy metadata.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -28,9 +30,9 @@ pub struct Metadata {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
-    /// Decision when no capability rule matches. Only `deny` is accepted in v0.1.
+    /// Decision when no capability rule matches. AgentGate 1.x requires `deny`.
     pub decision: RuleDecision,
-    /// Audit capture mode. Only `metadata` is accepted in v0.1.
+    /// Audit capture mode. AgentGate 1.x requires privacy-preserving `metadata`.
     pub audit: String,
 }
 
@@ -239,7 +241,7 @@ pub struct SessionTaintRule {
     pub except: Vec<ToolSelector>,
     /// Restricted effects.
     pub to_effects: Vec<Effect>,
-    /// v0.1 supports deny only.
+    /// AgentGate 1.x supports deny only for conservative session taint.
     pub decision: RuleDecision,
 }
 
@@ -347,7 +349,7 @@ impl CompiledPolicy {
             agentgate_core::CanonicalJson::from_value(&canonical).map_err(PolicyError::Core)?;
         Ok(Self {
             document,
-            digest: Digest::domain(b"policy/v1alpha1", canonical.as_bytes()),
+            digest: Digest::domain(b"policy/v1", canonical.as_bytes()),
         })
     }
 
@@ -521,7 +523,7 @@ pub struct Evaluation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyTestSuite {
-    /// Test schema version; v0.1 supports one.
+    /// Stable test schema version.
     #[serde(rename = "schemaVersion")]
     pub schema_version: u64,
     /// Independent deterministic cases.
@@ -629,6 +631,92 @@ impl CompiledPolicy {
             cases: passed,
         })
     }
+
+    /// Produces a deterministic, metadata-only change report between two compiled policies.
+    #[must_use]
+    pub fn diff(&self, next: &Self) -> PolicyDiffReport {
+        let current_rules = rule_ids(&self.document);
+        let next_rules = rule_ids(&next.document);
+        let current_servers = self
+            .document
+            .servers
+            .iter()
+            .map(|server| server.id.clone())
+            .collect::<BTreeSet<_>>();
+        let next_servers = next
+            .document
+            .servers
+            .iter()
+            .map(|server| server.id.clone())
+            .collect::<BTreeSet<_>>();
+        PolicyDiffReport {
+            from_digest: self.digest.to_hex(),
+            to_digest: next.digest.to_hex(),
+            added_servers: next_servers.difference(&current_servers).cloned().collect(),
+            removed_servers: current_servers.difference(&next_servers).cloned().collect(),
+            added_rules: next_rules.difference(&current_rules).cloned().collect(),
+            removed_rules: current_rules.difference(&next_rules).cloned().collect(),
+            changed: self.digest != next.digest,
+        }
+    }
+}
+
+/// Stable metadata-only policy change report used by review and upgrade tooling.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PolicyDiffReport {
+    /// Original compiled digest.
+    pub from_digest: String,
+    /// Candidate compiled digest.
+    pub to_digest: String,
+    /// Server identities newly introduced by the candidate.
+    pub added_servers: Vec<String>,
+    /// Server identities removed by the candidate.
+    pub removed_servers: Vec<String>,
+    /// Rule identities newly introduced by the candidate.
+    pub added_rules: Vec<String>,
+    /// Rule identities removed by the candidate.
+    pub removed_rules: Vec<String>,
+    /// Whether any security-relevant canonical policy byte changed.
+    pub changed: bool,
+}
+
+/// Migrates the preview `v1alpha1` policy schema to the stable `v1` schema.
+///
+/// Migration is deliberately explicit: the normal compiler never silently accepts a preview
+/// document, so an operator can review and test the generated policy before activation.
+pub fn migrate_v1alpha1_to_v1(source: &str) -> Result<String, PolicyError> {
+    let mut value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(source).map_err(PolicyError::Yaml)?;
+    let mapping = value.as_mapping_mut().ok_or_else(|| {
+        PolicyError::Validation("policy migration requires a YAML mapping".to_owned())
+    })?;
+    let version_key = serde_yaml_ng::Value::String("apiVersion".to_owned());
+    let version = mapping
+        .get(&version_key)
+        .and_then(serde_yaml_ng::Value::as_str);
+    if version != Some(LEGACY_POLICY_API_VERSION) {
+        return Err(PolicyError::Validation(format!(
+            "migration source apiVersion must be {LEGACY_POLICY_API_VERSION}"
+        )));
+    }
+    mapping.insert(
+        version_key,
+        serde_yaml_ng::Value::String(POLICY_API_VERSION.to_owned()),
+    );
+    let document: GatewayPolicy = serde_yaml_ng::from_value(value).map_err(PolicyError::Yaml)?;
+    validate(&document)?;
+    serde_yaml_ng::to_string(&document).map_err(PolicyError::Yaml)
+}
+
+fn rule_ids(policy: &GatewayPolicy) -> BTreeSet<String> {
+    policy
+        .servers
+        .iter()
+        .flat_map(|server| server.rules.iter().map(|rule| rule.id.clone()))
+        .chain(policy.flows.iter().map(|rule| rule.id.clone()))
+        .chain(policy.session_taint.iter().map(|rule| rule.id.clone()))
+        .chain(policy.chains.iter().map(|rule| rule.id.clone()))
+        .collect()
 }
 
 impl Evaluation {
@@ -689,12 +777,12 @@ fn validate(policy: &GatewayPolicy) -> Result<(), PolicyError> {
     }
     if policy.defaults.decision != RuleDecision::Deny {
         return Err(PolicyError::Validation(
-            "v0.1 default decision must be deny".to_owned(),
+            "v1 default decision must be deny".to_owned(),
         ));
     }
     if policy.defaults.audit != "metadata" {
         return Err(PolicyError::Validation(
-            "v0.1 audit mode must be metadata".to_owned(),
+            "v1 audit mode must be metadata".to_owned(),
         ));
     }
 
@@ -768,7 +856,7 @@ fn validate(policy: &GatewayPolicy) -> Result<(), PolicyError> {
         insert_rule_id(&mut rule_ids, &rule.id)?;
         if rule.decision != RuleDecision::Deny {
             return Err(PolicyError::Validation(format!(
-                "session-taint rule {} must deny in v0.1",
+                "session-taint rule {} must deny in v1",
                 rule.id
             )));
         }
@@ -923,10 +1011,10 @@ mod tests {
     use agentgate_core::{Decision, Effect, Obligation};
     use serde_json::json;
 
-    use super::{CompiledPolicy, DecisionContext};
+    use super::{CompiledPolicy, DecisionContext, migrate_v1alpha1_to_v1};
 
     const POLICY: &str = r#"
-apiVersion: agentgate.dev/v1alpha1
+apiVersion: agentgate.dev/v1
 kind: GatewayPolicy
 metadata: { name: test, version: 1 }
 defaults: { decision: deny, audit: metadata }
@@ -970,6 +1058,28 @@ sessionTaint:
 
     fn policy() -> CompiledPolicy {
         CompiledPolicy::from_yaml(POLICY).unwrap_or_else(|error| unreachable!("{error}"))
+    }
+
+    #[test]
+    fn preview_policy_requires_explicit_reviewable_migration() {
+        let legacy = POLICY.replace("agentgate.dev/v1", "agentgate.dev/v1alpha1");
+        assert!(CompiledPolicy::from_yaml(&legacy).is_err());
+        let migrated =
+            migrate_v1alpha1_to_v1(&legacy).unwrap_or_else(|error| unreachable!("{error}"));
+        let compiled =
+            CompiledPolicy::from_yaml(&migrated).unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(compiled.document().api_version, "agentgate.dev/v1");
+    }
+
+    #[test]
+    fn policy_diff_reports_rule_identity_changes_without_payloads() {
+        let current = policy();
+        let candidate = CompiledPolicy::from_yaml(&POLICY.replace("id: read", "id: read-v2"))
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let report = current.diff(&candidate);
+        assert!(report.changed);
+        assert_eq!(report.added_rules, vec!["read-v2"]);
+        assert_eq!(report.removed_rules, vec!["read"]);
     }
 
     #[test]

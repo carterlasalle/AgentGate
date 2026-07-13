@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentgate"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-approval",
  "agentgate-audit",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-approval"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-core",
  "async-trait",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-audit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-core",
  "base64",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hex",
  "serde",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-integrity"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-core",
  "regex",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-policy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-core",
  "regex",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "proptest",
  "serde",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-provenance"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-core",
  "hex",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "agentgate-testkit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentgate-core",
  "agentgate-protocol",
