@@ -415,14 +415,16 @@ fn terminal_decision(request: &ApprovalRequest) -> Result<ApprovalOutcome, Appro
 
 #[cfg(target_os = "macos")]
 fn macos_decision(request: &ApprovalRequest) -> Result<ApprovalOutcome, ApprovalError> {
+    use std::fmt::Write as _;
+
     let mut summary = format!(
         "AgentGate blocked a consequential action.\n\nServer/tool: {}/{}\nEffects: {:?}\n",
         request.server_id, request.tool, request.effects
     );
     for field in &request.fields {
-        summary.push_str(&format!("\n{}: {}", field.selector, field.value));
+        let _ = write!(summary, "\n{}: {}", field.selector, field.value);
     }
-    summary.push_str(&format!("\n\nAction digest: {}", request.action_digest));
+    let _ = write!(summary, "\n\nAction digest: {}", request.action_digest);
     let script = r#"on run argv
 set promptText to item 1 of argv
 try
