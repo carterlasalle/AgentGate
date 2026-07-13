@@ -9,7 +9,7 @@ AgentGate is a local security firewall for AI agents. It runs between an MCP hos
 
 The flagship policy protects [`mac_messages_mcp`](https://github.com/carterlasalle/mac_messages_mcp): local message reads are labeled sensitive; sends always require confirmation; and Messages data cannot flow into unrelated network or upload tools.
 
-> **Status:** AgentGate 1.0 security-stable implementation. Stable policy and audit schemas, explicit preview-policy migration, exact approvals, authenticated lineage, detached audit anchoring, release evidence, and the original enforcement boundary are implemented and tested. Review the [security boundary](docs/THREAT_MODEL.md#8-assumptions-and-limitations) before deployment.
+> **Status:** AgentGate 1.0 implementation. Every repository-controlled M0–M11 gate is implemented and tested: stable policy/audit schemas, explicit preview-policy migration, exact approvals, authenticated lineage, detached audit anchoring, and release evidence. Independent external threat-model/cryptographic review remains an assurance gate that the project cannot honestly self-certify; its review packet and status are explicit in the [v1 release evidence](docs/RELEASE_V1.md). Review the [security boundary](docs/THREAT_MODEL.md#8-assumptions-and-limitations) before deployment.
 
 ## What is implemented
 
