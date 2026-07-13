@@ -385,34 +385,33 @@ impl<P: ApprovalProvider> GatewayEngine<P> {
             .get("_meta")
             .and_then(|value| value.get("agentgateLineage"))
         {
-            let key = self.lineage_key.as_ref().ok_or_else(|| {
-                GatewayError::InvalidLineage(
-                    "host supplied lineage but no lineage key is configured".to_owned(),
-                )
-            })?;
-            let envelopes: Vec<SignedLineage> = serde_json::from_value(lineage_value.clone())
-                .map_err(|error| GatewayError::InvalidLineage(error.to_string()))?;
-            if envelopes.is_empty() || envelopes.len() > 32 {
-                return Err(GatewayError::InvalidLineage(
-                    "lineage list must contain 1-32 assertions".to_owned(),
-                ));
-            }
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_err(|_| {
-                    GatewayError::InvalidLineage("system clock is before epoch".to_owned())
-                })?
-                .as_secs();
-            for envelope in envelopes {
-                evidence.push(verify_lineage(
-                    key,
-                    &envelope,
-                    &self.session_id.to_string(),
-                    &self.server_id,
-                    tool,
-                    &arguments,
-                    now,
-                )?);
+            match authenticated_lineage_evidence(
+                self.lineage_key.as_ref(),
+                lineage_value,
+                self.session_id,
+                &self.server_id,
+                tool,
+                &arguments,
+            ) {
+                Ok(authenticated) => evidence.extend(authenticated),
+                Err(error) => {
+                    self.audit.append(
+                        Some(self.session_id),
+                        "decision_made",
+                        json!({
+                            "decision": "deny",
+                            "code": "AG-FLOW-BLOCKED",
+                            "tool": tool,
+                            "reason": error.to_string(),
+                        }),
+                    )?;
+                    return Ok(HostDisposition::ToHost(error_response(
+                        Some(id),
+                        GATEWAY_ERROR_CODE,
+                        "AG-FLOW-BLOCKED",
+                        "authenticated lineage was invalid",
+                    )));
+                }
             }
         }
         let mut active_labels = self.provenance.active_labels().clone();
@@ -918,10 +917,64 @@ fn fs_prepare(path: &Path) -> Result<(), GatewayError> {
 }
 
 fn load_lineage_key(path: &Path) -> Result<[u8; 32], GatewayError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)
+            .map_err(GatewayError::State)?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(GatewayError::InvalidLineage(
+                "lineage key must not be accessible by group or other users".to_owned(),
+            ));
+        }
+    }
     let bytes = std::fs::read(path).map_err(GatewayError::State)?;
     bytes.try_into().map_err(|_| {
         GatewayError::InvalidLineage("lineage key must be exactly 32 bytes".to_owned())
     })
+}
+
+fn authenticated_lineage_evidence(
+    key: Option<&[u8; 32]>,
+    value: &Value,
+    session_id: SessionId,
+    server_id: &str,
+    tool: &str,
+    arguments: &Value,
+) -> Result<Vec<agentgate_provenance::FlowEvidence>, GatewayError> {
+    let key = key.ok_or_else(|| {
+        GatewayError::InvalidLineage(
+            "host supplied lineage but no lineage key is configured".to_owned(),
+        )
+    })?;
+    let envelopes: Vec<SignedLineage> = serde_json::from_value(value.clone())
+        .map_err(|error| GatewayError::InvalidLineage(error.to_string()))?;
+    if envelopes.is_empty() || envelopes.len() > 32 {
+        return Err(GatewayError::InvalidLineage(
+            "lineage list must contain 1-32 assertions".to_owned(),
+        ));
+    }
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| GatewayError::InvalidLineage("system clock is before epoch".to_owned()))?
+        .as_secs();
+    envelopes
+        .iter()
+        .map(|envelope| {
+            verify_lineage(
+                key,
+                envelope,
+                &session_id.to_string(),
+                server_id,
+                tool,
+                arguments,
+                now,
+            )
+            .map_err(GatewayError::Provenance)
+        })
+        .collect()
 }
 
 fn advertise_agentgate_session(response: &mut Value, session: SessionId, lineage: bool) {
@@ -1089,6 +1142,30 @@ flows:
             .await
             .unwrap_or_else(|error| unreachable!("{error}"));
         assert!(matches!(send, HostDisposition::ToServer(_)));
+    }
+
+    #[tokio::test]
+    async fn unconfigured_or_forged_lineage_is_denied_without_forwarding() {
+        let (_directory, mut engine) = engine(ApprovalOutcome::Approve);
+        inventory(&mut engine).await;
+        let outcome = engine
+            .handle_host(parse(json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{
+                    "name":"send_message",
+                    "arguments":{"recipient":"+15555550100","message":"derived"},
+                    "_meta":{"agentgateLineage":[{}]}
+                }
+            })))
+            .await
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        let HostDisposition::ToHost(response) = outcome else {
+            unreachable!("invalid lineage must be answered locally")
+        };
+        assert_eq!(
+            response["error"]["data"]["agentgate_code"],
+            "AG-FLOW-BLOCKED"
+        );
     }
 
     #[tokio::test]

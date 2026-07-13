@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use agentgate_audit::{
@@ -211,7 +212,6 @@ async fn main() -> anyhow::Result<()> {
             let migrated = migrate_v1alpha1_to_v1(&source)?;
             let mut options = std::fs::OpenOptions::new();
             options.create_new(true).write(true);
-            use std::io::Write as _;
             let mut file = options.open(&output)?;
             file.write_all(migrated.as_bytes())?;
             file.sync_all()?;

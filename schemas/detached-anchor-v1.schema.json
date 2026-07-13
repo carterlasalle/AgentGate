@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentgate.dev/schemas/detached-anchor-v1.schema.json",
+  "title": "AgentGate Detached Audit Anchor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "events", "final_hash", "key_id", "public_key", "created_at", "signature"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "events": { "type": "integer", "minimum": 1 },
+    "final_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "key_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "public_key": { "type": "string", "minLength": 43, "maxLength": 44 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "signature": { "type": "string", "minLength": 86, "maxLength": 88 }
+  }
+}
