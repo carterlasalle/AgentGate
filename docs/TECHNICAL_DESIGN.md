@@ -174,7 +174,7 @@ This is intentionally conservative. The decision explanation distinguishes `exac
 
 ### 6.4 Host-assisted lineage
 
-A future host extension can attach authenticated lineage references to tool arguments. AgentGate verifies them using a per-session key negotiated out of band. Without authentication, host-provided lineage can raise risk but cannot establish safe declassification.
+An enabled trusted host adapter attaches authenticated lineage envelopes to MCP request `_meta`. AgentGate advertises the session ID during initialization and verifies HMAC-bound session, server, tool, canonical arguments, validity window, nonce, and label using a dedicated out-of-band key. The envelope is never forwarded as tool arguments. Without authentication, host-provided lineage cannot establish trusted evidence.
 
 ## 7. Approval protocol
 
@@ -242,7 +242,7 @@ The default event records stable IDs, effect/label sets, rule/finding IDs, sizes
 
 ### Verification guarantees
 
-Given the starting checkpoint/public key and retained chain, verification detects event mutation, insertion, deletion within the chain, duplication, and reordering. Local-only storage cannot prove that the entire file was not deleted. Optional external checkpoint anchoring is deferred.
+Given the starting checkpoint/public key and retained chain, verification detects event mutation, insertion, deletion within the chain, duplication, and reordering. Version 1 can export a public verifier and a detached signed anchor covering the exact event count/final hash. Whole-log deletion evidence requires the operator to retain that anchor in an independent system; a local anchor alone cannot provide the guarantee.
 
 ### Replay
 

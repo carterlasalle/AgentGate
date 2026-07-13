@@ -13,6 +13,9 @@ ADRs capture decisions that materially affect AgentGate's security claims, compa
 | [0007](0007-deterministic-security-decisions.md) | Keep model analysis additive and outside authorization authority | Accepted |
 | [0008](0008-stdio-first-transport.md) | Ship stdio first, then add Streamable HTTP behind a common transport contract | Accepted |
 | [0009](0009-red-team-corpus-as-product.md) | Treat the adversarial corpus and reference demo as versioned release artifacts | Accepted |
+| [0010](0010-stable-v1-policy.md) | Freeze stable v1 policy and require explicit migration | Accepted |
+| [0011](0011-authenticated-lineage.md) | Authenticate host lineage out of band | Accepted |
+| [0012](0012-detached-audit-anchors.md) | Export public verifiers and detached audit anchors | Accepted |
 
 ## Template
 

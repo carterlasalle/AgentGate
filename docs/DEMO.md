@@ -54,10 +54,13 @@ Verify the resulting evidence:
 
 ```bash
 AUDIT_FILE=$(find /tmp/agentgate-demo-state/audit -name '*.jsonl' | head -1)
+target/debug/agentgate audit export-key \
+  --signing-key /tmp/agentgate-demo-state/keys/audit-ed25519.key \
+  --output /tmp/agentgate-demo-state/keys/audit-ed25519.pub
 target/debug/agentgate audit verify "$AUDIT_FILE" \
-  --key /tmp/agentgate-demo-state/keys/audit-ed25519.key
+  --public-key /tmp/agentgate-demo-state/keys/audit-ed25519.pub
 target/debug/agentgate audit replay "$AUDIT_FILE" \
-  --key /tmp/agentgate-demo-state/keys/audit-ed25519.key
+  --public-key /tmp/agentgate-demo-state/keys/audit-ed25519.pub
 ```
 
 The verifier reports event/checkpoint counts, final hash, and expected key ID. Replay reports decisions/forwards/denials and does not execute the fake server.

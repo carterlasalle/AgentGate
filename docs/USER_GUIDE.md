@@ -109,7 +109,7 @@ When a configured source returns sensitive fields, AgentGate:
 
 Exact and normalized matches explain the detected source label and method. Session taint is intentionally conservative: after Messages content enters the model context, unrelated network/upload/send effects can remain denied even when a later argument no longer contains an exact copy.
 
-End the MCP session to clear session taint. v0.1 deliberately has no casual “clear taint” action.
+End the MCP session to clear session taint. Version 1 deliberately has no casual “clear taint” action.
 
 ## 7. Tool integrity
 
@@ -133,7 +133,7 @@ STATE_DIR/
   trust/manifests.json
 ```
 
-Audit and key files are created owner-only on Unix. Keep the signing key separate when validating copied evidence. Anyone with the signing key can create a different valid chain; `--key` ensures the checkpoint was signed by the expected installation key.
+Audit and signing-key files are created owner-only on Unix. Export and distribute only the public verifier when validating copied evidence. Anyone with the signing key can create a different valid chain; `--public-key` verifies the expected installation without exposing that secret.
 
 By default, startup removes audit JSONL files older than 30 days and keeps aggregate retained audit data under 512 MiB. Configure `agentgate run` with `--audit-retention-days` and `--audit-maximum-bytes`. The new session records the retention summary; non-audit files are never removed.
 
@@ -142,15 +142,18 @@ Default audit records contain IDs, digests, effects, labels, findings, byte coun
 ## 9. Audit verification and replay
 
 ```bash
+agentgate audit export-key \
+  --signing-key STATE_DIR/keys/audit-ed25519.key \
+  --output STATE_DIR/keys/audit-ed25519.pub
 agentgate audit verify STATE_DIR/audit/SESSION.jsonl \
-  --key STATE_DIR/keys/audit-ed25519.key
+  --public-key STATE_DIR/keys/audit-ed25519.pub
 ```
 
 A non-zero exit means the log is malformed, the chain is broken, a checkpoint signature is invalid, or the signer is unexpected.
 
 ```bash
 agentgate audit replay STATE_DIR/audit/SESSION.jsonl \
-  --key STATE_DIR/keys/audit-ed25519.key
+  --public-key STATE_DIR/keys/audit-ed25519.pub
 ```
 
 Replay first performs complete verification, then reports recorded decisions, forwards, denials, and policy digests. It does not launch a downstream server, execute a tool, resolve DNS, or make a network request.

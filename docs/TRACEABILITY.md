@@ -12,7 +12,7 @@ This matrix connects product promises to normative behavior, engineering constra
 | PG-04 Human control of consequences | SR-020–028, UXR-001–007 | TR-040–045 | ADR-0005 | M3, M7 | T-02, T-04, T-05, T-07, T-11 |
 | PG-05 Detect manipulation/chains | FR-010–015, SR-030–045 | TR-060–065 | ADR-0007, 0009 | M5, M7 | T-01, T-02, T-07, T-08 |
 | PG-06 Trustworthy forensic evidence | SR-050–059 | TR-070–084 | ADR-0006 | M6, M8 | T-01, T-02, T-09, T-12 |
-| PG-07 Portfolio-grade reproducibility | all plus UXR | TR-090–094, NFR-001–010 | ADR-0009 | M0, M7, M8, M10 | T-07–T-12 and release bundle |
+| PG-07 Portfolio-grade reproducibility | all plus UXR | TR-090–094, NFR-001–010 | ADR-0009, 0010, 0012 | M0, M7, M8, M10, M11 | T-07–T-12 and release bundle |
 
 ## 2. Threat traceability
 
@@ -66,6 +66,9 @@ This matrix connects product promises to normative behavior, engineering constra
 | ADR-0007 deterministic decisions | T-02 replay, network/model-disabled tests, T-07 poisoning |
 | ADR-0008 stdio first | T-03, T-05, T-11 |
 | ADR-0009 corpus as product | T-07, T-11, T-12 release bundle |
+| ADR-0010 stable v1 policy | migration/overwrite tests, policy digest and diff fixtures |
+| ADR-0011 authenticated lineage | binding, forgery, expiry, session/tool/argument swap tests |
+| ADR-0012 detached anchors | public-key CLI round trip and anchor mutation/coverage tests |
 
 ## 5. Flagship acceptance trace
 

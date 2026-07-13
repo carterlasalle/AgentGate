@@ -2,7 +2,7 @@
 
 **Product:** AgentGate  
 **Status:** Baseline  
-**Target release:** v0.1 local developer preview, followed by v1.0 security-stable local gateway  
+**Target release:** v1.0 security-stable local gateway
 **Primary integration:** `mac_messages_mcp`
 
 ## 1. Executive summary

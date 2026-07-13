@@ -29,6 +29,7 @@
 | M8 | v0.1 hardening and release | 1 week | M7 |
 | M9 | v0.2 transport/UX/storage hardening | 3–5 weeks | v0.1 evidence |
 | M10 | v1.0 stability and review | evidence-driven | v0.2 |
+| M11 | v1.0 operational assurance | evidence-driven | M10 |
 
 With one experienced engineer, v0.1 is roughly 11–13 focused engineering weeks. Scope is cut by deferring features, never by weakening fail-closed invariants.
 
@@ -293,7 +294,16 @@ Each item is independently shippable and must not alter v1 security invariants s
 - Verify artifact signing, SBOM, provenance, reproducibility, and upgrade/rollback behavior.
 - Require two-person review for changes touching canonicalization, policy precedence, approval binding, audit hashing/signing, and invariant effects.
 
-## 14. Scope-control rules
+## 14. M11 — v1.0 operational assurance
+
+- Remove private signing keys from routine verification workflows; export public verifiers.
+- Produce portable detached anchors that bind an exact verified log and can be retained externally.
+- Add stable preview-policy migration, canonical policy diff, upgrade/rollback documentation, and CLI contract tests.
+- Publish supported-version, compatibility, incident-response, and release-evidence documents.
+- Run release builds and artifact checks on direct `main` pushes, not only pull requests.
+- Keep the independent external assessment gate explicit; never self-certify external review.
+
+## 15. Scope-control rules
 
 If schedule pressure appears, defer in this order:
 
@@ -305,7 +315,7 @@ If schedule pressure appears, defer in this order:
 
 Do not cut default deny, exact-action approval, Messages flow controls, deterministic manifest integrity, audit tamper evidence, red-team corpus, or published limitations.
 
-## 15. Definition of done for every security feature
+## 16. Definition of done for every security feature
 
 - Requirement and threat/corpus IDs linked.
 - Failing test/corpus case exists before implementation.

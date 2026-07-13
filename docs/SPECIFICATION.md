@@ -1,7 +1,7 @@
 # System Specification
 
 **Status:** Normative baseline  
-**Scope:** AgentGate v0.1 and v1 invariants
+**Scope:** AgentGate 1.x stable externally observable behavior and retained preview migration invariants
 
 ## 1. Terms
 

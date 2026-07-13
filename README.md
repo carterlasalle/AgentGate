@@ -9,20 +9,21 @@ AgentGate is a local security firewall for AI agents. It runs between an MCP hos
 
 The flagship policy protects [`mac_messages_mcp`](https://github.com/carterlasalle/mac_messages_mcp): local message reads are labeled sensitive; sends always require confirmation; and Messages data cannot flow into unrelated network or upload tools.
 
-> **Status:** working v0.1 security preview. The stdio gateway, policy compiler, approvals, provenance controls, manifest integrity, action-chain containment, signed audit verifier/replay, fake MCP lab, and adversarial corpus are implemented and tested. Review the [security boundary](docs/THREAT_MODEL.md#8-assumptions-and-limitations) before relying on it.
+> **Status:** AgentGate 1.0 security-stable implementation. Stable policy and audit schemas, explicit preview-policy migration, exact approvals, authenticated lineage, detached audit anchoring, release evidence, and the original enforcement boundary are implemented and tested. Review the [security boundary](docs/THREAT_MODEL.md#8-assumptions-and-limitations) before deployment.
 
 ## What is implemented
 
 - Strict newline-delimited JSON-RPC 2.0 parsing with duplicate-key, size, depth, collection, ID, batch, and notification controls.
 - MCP `2025-11-25` stdio mediation with lifecycle negotiation, request correlation, tool inventory interception, child-process isolation, and clean shutdown.
-- Strict YAML policy-as-code compiled into deterministic typed rules; no match means deny and unknown fields fail compilation.
+- Stable `agentgate.dev/v1` YAML policy-as-code compiled into deterministic typed rules; no match means deny, unknown fields fail compilation, and preview policies require explicit migration.
 - Trusted effect classification and non-bypassable human approval for sends, uploads, deletions, and purchases.
 - One-time approval receipts bound to canonical arguments, session, policy digest, manifest digest, nonce, and short expiry.
 - Native macOS approval dialogs for GUI-launched clients and dedicated-terminal approval elsewhere.
 - Per-session HMAC-SHA-256 exact, normalized, and bounded-chunk fingerprints plus conservative session taint.
+- Authenticated host-lineage envelopes bound to the exact session, server, tool, arguments, validity window, and adapter nonce.
 - Deterministic descriptor-poisoning detectors, normalized manifest pinning, rug-pull quarantine, and safe evidence excerpts.
 - Bounded action graph with repeated denial/high-impact action containment.
-- Metadata-first JSONL audit chains with domain-separated hashes, Ed25519 checkpoints, trusted-key verification, and no-tool dry replay.
+- Metadata-first JSONL audit chains with domain-separated hashes, Ed25519 checkpoints, public-key verification, detached anchors, and no-tool dry replay.
 - Eleven hermetic red-team scenarios and synthetic malicious MCP server modes.
 
 ## Architecture
@@ -70,6 +71,9 @@ agentgate policy check --policy examples/policies/mac_messages_mcp.yaml
 agentgate policy test \
   --policy examples/policies/mac_messages_mcp.yaml \
   --cases examples/policies/mac_messages_mcp.tests.yaml
+agentgate policy diff \
+  --current examples/policies/mac_messages_mcp.yaml \
+  --candidate examples/policies/mac_messages_mcp.yaml
 agentgate doctor --policy examples/policies/mac_messages_mcp.yaml
 ```
 
@@ -110,11 +114,19 @@ The lab uses synthetic data and makes no network calls. See the [demo walkthroug
 Every run creates a session log and installation key under the selected state directory:
 
 ```bash
+agentgate audit export-key \
+  --signing-key agentgate-state/keys/audit-ed25519.key \
+  --output agentgate-state/keys/audit-ed25519.pub
+
 agentgate audit verify agentgate-state/audit/<session>.jsonl \
-  --key agentgate-state/keys/audit-ed25519.key
+  --public-key agentgate-state/keys/audit-ed25519.pub
 
 agentgate audit replay agentgate-state/audit/<session>.jsonl \
-  --key agentgate-state/keys/audit-ed25519.key
+  --public-key agentgate-state/keys/audit-ed25519.pub
+
+agentgate audit anchor agentgate-state/audit/<session>.jsonl \
+  --signing-key agentgate-state/keys/audit-ed25519.key \
+  --output agentgate-state/audit/<session>.anchor.json
 ```
 
 Verification detects modification, insertion, removal inside the retained chain, duplication, reordering, truncation relative to a trusted checkpoint, and unexpected signing keys. Local-only evidence cannot prove that an attacker with sufficient filesystem control did not delete the entire log.
@@ -125,8 +137,13 @@ Verification detects modification, insertion, removal inside the retained chain,
 agentgate run --policy <policy.yaml> [--server <id>] [--state-dir <path>]
 agentgate policy check --policy <policy.yaml>
 agentgate policy test --policy <policy.yaml> --cases <cases.yaml>
-agentgate audit verify <audit.jsonl> [--key <signing.key>]
-agentgate audit replay <audit.jsonl> [--key <signing.key>]
+agentgate policy migrate --policy <v1alpha1.yaml> --output <v1.yaml>
+agentgate policy diff --current <policy.yaml> --candidate <policy.yaml>
+agentgate audit verify <audit.jsonl> [--public-key <verifier.pub>]
+agentgate audit replay <audit.jsonl> [--public-key <verifier.pub>]
+agentgate audit export-key --signing-key <signing.key> --output <verifier.pub>
+agentgate audit anchor <audit.jsonl> --signing-key <signing.key> --output <anchor.json>
+agentgate audit verify-anchor <audit.jsonl> --anchor <anchor.json> [--public-key <verifier.pub>]
 agentgate audit rotate-key <signing.key>
 agentgate doctor --policy <policy.yaml> [--state-dir <path>]
 agentgate version
@@ -146,6 +163,9 @@ agentgate version
 | [Policy model](docs/POLICY_MODEL.md) | Capability, flow, taint, approval, and integrity semantics |
 | [Test strategy](docs/TEST_STRATEGY.md) | Unit, property, conformance, integration, adversarial, fuzz, fault, and performance evidence |
 | [Traceability](docs/TRACEABILITY.md) | Product goals through requirements, decisions, milestones, and tests |
+| [v1 migration](docs/MIGRATION_V1.md) | Preview-policy upgrade, compatibility contract, and rollback procedure |
+| [v1 release evidence](docs/RELEASE_V1.md) | M0–M11 completion evidence and remaining external assurance gate |
+| [Incident response](docs/INCIDENT_RESPONSE.md) | Containment, evidence preservation, recovery, and notification runbook |
 | [Architecture decisions](docs/adr/README.md) | Nine accepted ADRs and tradeoffs |
 | [Red-team corpus](redteam/README.md) | Versioned attacks, fake servers, expected outcomes, and safe execution |
 

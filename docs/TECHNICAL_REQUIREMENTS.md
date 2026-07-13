@@ -1,7 +1,7 @@
 # Technical Requirements
 
 **Status:** Normative baseline  
-**Target:** v0.1 unless marked v0.2 or v1.0
+**Target:** v1.0; historical preview/bridge annotations remain for compatibility context
 
 ## 1. Compatibility baseline
 

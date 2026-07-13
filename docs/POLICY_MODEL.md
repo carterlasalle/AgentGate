@@ -1,7 +1,7 @@
 # Policy Model
 
-**Status:** Proposed authoring contract for v0.1  
-**Format:** Strict YAML, schema `agentgate.dev/policy/v1alpha1`
+**Status:** Stable authoring contract for AgentGate 1.x
+**Format:** Strict YAML, schema `agentgate.dev/v1`
 
 ## 1. Goals
 
@@ -12,7 +12,7 @@ Policy files cannot execute code, interpolate shell commands, call services/mode
 ## 2. Document shape
 
 ```yaml
-apiVersion: agentgate.dev/v1alpha1
+apiVersion: agentgate.dev/v1
 kind: GatewayPolicy
 metadata:
   name: messages-local
@@ -31,7 +31,7 @@ The compiler rejects duplicate keys and rule IDs, aliases/anchors if the selecte
 
 ## 3. Stable identity
 
-A server selector includes a local policy ID and executable identity. v0.1 supports command path plus configured package/version or executable digest. Display name alone is never an identity.
+A server selector includes a local policy ID and executable identity. Version 1 supports command path plus configured package/version or executable digest. Display name alone is never an identity.
 
 A tool selector is scoped under a server and matches an exact tool name by default. Regex selectors require an explicit `match: regex` and use a linear-time engine. Manifest pinning may be `required`, `review_on_change`, or `observe`.
 
@@ -122,7 +122,7 @@ sessionTaint:
     decision: deny
 ```
 
-This covers transformed content that fingerprints cannot recognize. Exact flow rules can create a narrower approved exception. Taint clearing is not automatic; v0.1 ends it only with session termination or an explicit audited policy-defined transition.
+This covers transformed content that fingerprints cannot recognize. Exact flow rules can create a narrower approved exception. Taint clearing is not automatic; version 1 ends it only with session termination or an explicit audited policy-defined transition.
 
 ## 9. Chain rules
 
@@ -201,7 +201,7 @@ expect:
 
 ## 13. Evolution
 
-- `v1alpha1` may change incompatibly before v0.1 but migrations and examples update together.
-- `v1beta1` freezes conflict semantics and requires migration tooling.
+- `v1alpha1` is a retired preview input accepted only by `policy migrate`.
 - `v1` follows semantic versioning, ignores no unknown fields, and changes security semantics only through a new API version and ADR.
+- Migration writes a new reviewed file and never silently activates or overwrites policy.
 - The audit log records authoring and compiled-policy digests so replay does not depend on mutable files.

@@ -30,6 +30,8 @@ Changing an accepted security invariant requires a new superseding ADR and updat
 
 The [traceability matrix](TRACEABILITY.md) is the index connecting these identifiers.
 
+Operational v1 documents: [migration](MIGRATION_V1.md), [supported versions](SUPPORTED_VERSIONS.md), [incident response](INCIDENT_RESPONSE.md), and [release evidence](RELEASE_V1.md).
+
 ## Status vocabulary
 
 - **Proposed**: under review; implementation may spike but must not depend on it for release.
