@@ -40,7 +40,7 @@ jobs:
       - run: cargo deny check advisories bans licenses sources
 
   release-smoke:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     name: Release smoke (${{ matrix.target }})
     strategy:
       fail-fast: false
